@@ -18,6 +18,8 @@ const MIME_TYPES = {
   '.jpg': 'image/jpeg',
   '.wasm': 'application/wasm',
   '.task': 'application/octet-stream',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'application/json',
   '.ico': 'image/x-icon'
 };
 
@@ -70,10 +72,25 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n=================================================`);
-  console.log(` Window 3D App Server running on port ${PORT}`);
-  console.log(` -> http://localhost:${PORT}`);
-  console.log(` -> http://127.0.0.1:${PORT}`);
-  console.log(`=================================================\n`);
+async function ensureAssets() {
+  const tokyoPath = path.join(__dirname, 'assets', 'models', 'LittlestTokyo.glb');
+  if (!fs.existsSync(tokyoPath)) {
+    console.log('[Assets] 3D models not found. Automatically running scripts/fetch-assets.mjs...');
+    try {
+      const { spawnSync } = await import('child_process');
+      spawnSync(process.execPath, [path.join(__dirname, 'scripts', 'fetch-assets.mjs')], { stdio: 'inherit' });
+    } catch (e) {
+      console.warn('[Assets] Automatic asset fetch failed:', e.message);
+    }
+  }
+}
+
+ensureAssets().then(() => {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n=================================================`);
+    console.log(` Peekaboo 3D Living Window running on port ${PORT}`);
+    console.log(` -> http://localhost:${PORT}`);
+    console.log(` -> http://127.0.0.1:${PORT}`);
+    console.log(`=================================================\n`);
+  });
 });
