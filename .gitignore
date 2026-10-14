@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Large 3D binary models (downloaded via scripts/fetch-assets.mjs)
+assets/models/**/*.glb
+assets/models/*.glb
+
+# Scratch & diagnostic scripts
+scratch/
+*.log
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

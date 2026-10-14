@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Peekaboo — 3D Head-Tracked Living Window</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='90' height='90' x='5' y='5' rx='16' fill='%23050714' stroke='%2300f0ff' stroke-width='6'/><circle cx='50' cy='50' r='20' fill='%23ff007f'/><circle cx='50' cy='50' r='10' fill='%2300f0ff'/></svg>">
+  
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    :root {
+      --bg-dark: #050714;
+      --panel-bg: rgba(10, 16, 36, 0.82);
+      --panel-border: rgba(0, 240, 255, 0.25);
+      --neon-cyan: #00f0ff;
+      --neon-pink: #ff007f;
+      --neon-green: #00ff88;
+      --neon-yellow: #ffd700;
+      --text-main: #e2e8f0;
+      --text-muted: #8e9bb4;
+      --accent-glow: 0 0 16px rgba(0, 240, 255, 0.35);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-dark);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--text-main);
+    }
+
+    #canvas-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+      display: block;
+    }
+
+    /* Scene Transition Fade Overlay */
+    #scene-transition-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #000000;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 90;
+      transition: opacity 0.35s ease;
+    }
+
+    /* Scene Loading Progress Bar */
+    #scene-loading-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 3px;
+      width: 0%;
+      background: linear-gradient(90deg, #00f0ff, #ff007f);
+      box-shadow: 0 0 8px #00f0ff;
+      z-index: 95;
+      display: none;
+      transition: width 0.15s ease;
+    }
+
+    #scene-loading-label {
+      position: fixed;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      font-family: monospace;
+      color: var(--neon-cyan);
+      background: rgba(5, 7, 20, 0.85);
+      padding: 3px 10px;
+      border-radius: 12px;
+      border: 1px solid var(--panel-border);
+      z-index: 95;
+      display: none;
+    }
+
+    /* Start Screen Card */
+    #start-screen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.4s ease, visibility 0.4s ease;
+    }
+
+    #start-bg-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+
+    #start-screen.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .start-card {
+      position: relative;
+      z-index: 2;
+      width: 90%;
+      max-width: 500px;
+      padding: 40px 34px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 20px;
+      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.8), var(--accent-glow);
+      text-align: center;
+      backdrop-filter: blur(14px);
+      animation: cardAppear 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes cardAppear {
+      from { transform: translateY(20px) scale(0.96); opacity: 0; }
+      to { transform: translateY(0) scale(1); opacity: 1; }
+    }
+
+    .app-title {
+      font-size: 2.8rem;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: linear-gradient(135deg, #00f0ff 0%, #ffffff 45%, #ff007f 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 12px;
+      text-shadow: 0 0 24px rgba(0, 240, 255, 0.5);
+    }
+
+    .app-subtitle {
+      font-size: 1.05rem;
+      line-height: 1.55;
+      color: var(--text-muted);
+      margin-bottom: 26px;
+    }
+
+    .button-group {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .primary-btn {
+      appearance: none;
+      border: none;
+      outline: none;
+      background: linear-gradient(135deg, #00b4db, #0083b0);
+      color: #ffffff;
+      padding: 14px 24px;
+      font-size: 1.05rem;
+      font-weight: 600;
+      border-radius: 10px;
+      cursor: pointer;
+      box-shadow: 0 4px 18px rgba(0, 180, 219, 0.4);
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .primary-btn:hover {
+      background: linear-gradient(135deg, #00c6ff, #0072ff);
+      box-shadow: 0 6px 24px rgba(0, 240, 255, 0.6);
+      transform: translateY(-1px);
+    }
+
+    .primary-btn:active {
+      transform: translateY(1px);
+    }
+
+    .secondary-btn {
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+      padding: 12px 20px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .secondary-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.35);
+    }
+
+    .highlight-action {
+      border-color: var(--neon-cyan) !important;
+      color: var(--neon-cyan) !important;
+      background: rgba(0, 240, 255, 0.1) !important;
+      box-shadow: 0 0 12px rgba(0, 240, 255, 0.3) !important;
+    }
+
+    .error-container {
+      margin-top: 18px;
+      padding: 12px;
+      border-radius: 8px;
+      background: rgba(255, 30, 80, 0.15);
+      border: 1px solid rgba(255, 30, 80, 0.4);
+      color: #ff8ca3;
+      font-size: 0.9rem;
+      display: none;
+      line-height: 1.4;
+      text-align: left;
+    }
+
+    .spinner {
+      display: none;
+      width: 22px;
+      height: 22px;
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #ffffff;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Top Navigation HUD */
+    #top-nav {
+      position: fixed;
+      top: 14px;
+      right: 16px;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #scene-hud-picker {
+      position: fixed;
+      top: 14px;
+      left: 16px;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 6px 12px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    }
+
+    #hud-scene-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--neon-cyan);
+      letter-spacing: 0.05em;
+    }
+
+    .hud-select {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 6px;
+      color: #ffffff;
+      padding: 5px 8px;
+      font-size: 0.85rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .hud-select:focus {
+      border-color: var(--neon-cyan);
+    }
+
+    .icon-btn {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      color: var(--text-main);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .icon-btn:hover {
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+    }
+
+    /* Settings Panel */
+    #settings-panel {
+      position: fixed;
+      top: 60px;
+      right: 16px;
+      width: 320px;
+      max-height: calc(100vh - 80px);
+      overflow-y: auto;
+      z-index: 50;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      padding: 18px;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7), var(--accent-glow);
+      transition: transform 0.25s ease, opacity 0.25s ease, visibility 0.25s;
+    }
+
+    #settings-panel.hidden {
+      transform: translateX(340px);
+      opacity: 0;
+      pointer-events: none;
+      visibility: hidden;
+    }
+
+    .panel-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 14px;
+      color: var(--neon-cyan);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .control-row {
+      margin-bottom: 12px;
+    }
+
+    .control-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .control-value {
+      color: var(--text-main);
+      font-weight: 600;
+      font-family: monospace;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.15);
+      outline: none;
+      accent-color: var(--neon-cyan);
+      cursor: pointer;
+    }
+
+    input[type="number"], select {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 6px;
+      color: #ffffff;
+      padding: 6px 10px;
+      font-size: 0.9rem;
+      outline: none;
+    }
+
+    input[type="number"]:focus, select:focus {
+      border-color: var(--neon-cyan);
+    }
+
+    .switch-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 0.88rem;
+    }
+
+    .toggle-checkbox {
+      appearance: none;
+      width: 38px;
+      height: 20px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 10px;
+      position: relative;
+      cursor: pointer;
+      outline: none;
+      transition: background 0.2s;
+    }
+
+    .toggle-checkbox:checked {
+      background: var(--neon-cyan);
+    }
+
+    .toggle-checkbox::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: white;
+      transition: transform 0.2s;
+    }
+
+    .toggle-checkbox:checked::after {
+      transform: translateX(18px);
+    }
+
+    .recenter-btn {
+      width: 100%;
+      background: rgba(0, 240, 255, 0.15);
+      border: 1px solid var(--neon-cyan);
+      color: var(--neon-cyan);
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 6px;
+      transition: all 0.2s;
+    }
+
+    .recenter-btn:hover {
+      background: rgba(0, 240, 255, 0.3);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+    }
+
+    .divider {
+      height: 1px;
+      background: rgba(255, 255, 255, 0.1);
+      margin: 14px 0;
+    }
+
+    /* Bottom-Left Debug Overlay */
+    #debug-overlay {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 50;
+      width: 176px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 8px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+      font-size: 0.74rem;
+      font-family: monospace;
+      color: var(--text-main);
+    }
+
+    #debug-canvas {
+      width: 160px;
+      height: 120px;
+      border-radius: 6px;
+      background: #000;
+      display: block;
+      margin-bottom: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    .debug-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 2px;
+    }
+
+    .debug-label {
+      color: var(--text-muted);
+    }
+
+    .status-tag {
+      display: inline-block;
+      font-size: 0.68rem;
+      font-weight: bold;
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+
+    .tag-green {
+      background: rgba(0, 255, 136, 0.2);
+      color: var(--neon-green);
+      border: 1px solid rgba(0, 255, 136, 0.4);
+    }
+
+    .tag-red {
+      background: rgba(255, 0, 85, 0.2);
+      color: var(--neon-pink);
+      border: 1px solid rgba(255, 0, 85, 0.4);
+    }
+
+    .tag-mouse {
+      background: rgba(255, 215, 0, 0.2);
+      color: var(--neon-yellow);
+      border: 1px solid rgba(255, 215, 0, 0.4);
+    }
+
+    /* Credits Button & Modal */
+    #credits-btn {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      z-index: 50;
+      background: rgba(10, 16, 36, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: var(--text-muted);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      backdrop-filter: blur(6px);
+      transition: all 0.2s;
+    }
+
+    #credits-btn:hover {
+      color: #fff;
+      border-color: var(--neon-cyan);
+    }
+
+    #credits-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(4, 7, 18, 0.85);
+      backdrop-filter: blur(8px);
+      z-index: 120;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.2s;
+    }
+
+    #credits-modal.hidden {
+      display: none;
+    }
+
+    .credits-box {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      width: 90%;
+      max-width: 520px;
+      padding: 24px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    .credits-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--neon-cyan);
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .credits-close {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 1.4rem;
+      cursor: pointer;
+    }
+
+    .credits-close:hover {
+      color: #fff;
+    }
+
+    .credit-item {
+      margin-bottom: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 8px;
+    }
+
+    .credit-name {
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .credit-author {
+      color: var(--text-muted);
+      font-size: 0.82rem;
+    }
+
+    /* Gallery status toast */
+    #gallery-status-toast {
+      position: fixed;
+      top: 54px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 240, 255, 0.2);
+      border: 1px solid var(--neon-cyan);
+      color: var(--neon-cyan);
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      z-index: 60;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div id="scene-transition-overlay"></div>
+  <div id="scene-loading-bar"></div>
+  <div id="scene-loading-label">Loading Scene...</div>
+  <div id="gallery-status-toast">Gallery Playing</div>
+
+  <!-- Start Screen Modal -->
+  <div id="start-screen">
+    <canvas id="start-bg-canvas"></canvas>
+    <div class="start-card">
+      <h1 class="app-title">Peekaboo</h1>
+      <p class="app-subtitle">
+        Turn your monitor into an alive 3D physical window with head tracking, off-axis projection, and responsive living worlds.
+      </p>
+
+      <div class="button-group">
+        <button id="start-btn" class="primary-btn">
+          <span>Start Camera</span>
+          <div id="loading-spinner" class="spinner"></div>
+        </button>
+
+        <button id="mouse-mode-btn" class="secondary-btn">
+          Try with Mouse Fallback
+        </button>
+      </div>
+
+      <div id="error-message" class="error-container"></div>
+
+      <div style="margin-top: 16px; font-size: 0.78rem; color: var(--text-muted);">
+        Keys: <strong>1/2/3/0</strong> (Scenes) • <strong>F</strong> (Fullscreen) • <strong>P</strong> (Gallery) • <strong>H</strong> (Settings)
+      </div>
+    </div>
+  </div>
+
+  <!-- HUD Scene Selector (Top-Left) -->
+  <div id="scene-hud-picker">
+    <span id="hud-scene-title">Calibration</span>
+    <select id="scene-select" class="hud-select">
+      <option value="calibration">[0] Calibration Room</option>
+      <option value="abyss" selected>[1] Abyss</option>
+      <option value="tinyworld">[2] Tiny World</option>
+      <option value="starfall">[3] Starfall</option>
+    </select>
+  </div>
+
+  <!-- Top Navigation (Top-Right) -->
+  <div id="top-nav">
+    <button id="fullscreen-btn" class="icon-btn" title="Toggle Fullscreen (F)">
+      ⛶ Fullscreen
+    </button>
+    <button id="settings-toggle-btn" class="icon-btn" title="Toggle Settings (H)">
+      ⚙ Settings
+    </button>
+  </div>
+
+  <!-- Settings Panel -->
+  <div id="settings-panel" class="hidden">
+    <div class="panel-title">
+      <span>Window Calibration</span>
+      <span style="font-size: 0.8rem; color: var(--text-muted);">[H]</span>
+    </div>
+
+    <!-- Quality Tier -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Graphics Quality</span>
+      </div>
+      <select id="quality-select">
+        <option value="Auto">Auto (Dynamic Scaling)</option>
+        <option value="High">High (Full Bloom, Shadows, High-Res)</option>
+        <option value="Medium" selected>Medium (Balanced)</option>
+        <option value="Low">Low (Bloom Off, High FPS)</option>
+      </select>
+    </div>
+
+    <!-- Gallery Mode -->
+    <div class="switch-row">
+      <span>Gallery Mode (Cycle 45s, P to pause)</span>
+      <input type="checkbox" id="setting-gallery-mode" class="toggle-checkbox">
+    </div>
+
+    <!-- Edge Check Toggle -->
+    <div class="switch-row">
+      <span>Edge Check (Red Tint on Violation)</span>
+      <input type="checkbox" id="setting-edge-check" class="toggle-checkbox">
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Screen Size -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Screen Diagonal</span>
+        <span class="control-value"><span id="setting-screen-size-val">15.6</span>"</span>
+      </div>
+      <input type="number" id="setting-screen-size" min="10" max="65" step="0.1" value="15.6">
+    </div>
+
+    <!-- Horizontal FOV -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Webcam FOV (Horizontal)</span>
+        <span class="control-value"><span id="setting-hfov-val">65</span>°</span>
+      </div>
+      <input type="range" id="setting-hfov" min="50" max="90" step="1" value="65">
+    </div>
+
+    <!-- Interpupillary Distance (IPD) -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Interpupillary Distance</span>
+        <span class="control-value"><span id="setting-ipd-val">6.3</span> cm</span>
+      </div>
+      <input type="range" id="setting-ipd" min="5.5" max="7.5" step="0.1" value="6.3">
+    </div>
+
+    <!-- Parallax Strength -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Parallax Multiplier</span>
+        <span class="control-value"><span id="setting-parallax-val">1.0</span>x</span>
+      </div>
+      <input type="range" id="setting-parallax" min="0.5" max="2.5" step="0.1" value="1.0">
+    </div>
+
+    <!-- Curiosity Attractor for Starfall -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Starfall Curiosity Attraction</span>
+        <span class="control-value" id="setting-curiosity-val">0.3</span>
+      </div>
+      <input type="range" id="setting-curiosity" min="0.0" max="1.0" step="0.05" value="0.3">
+    </div>
+
+    <!-- Smoothing (One Euro Filter minCutoff) -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Smoothing (Jitter Reduction)</span>
+        <span class="control-value" id="setting-smoothing-val">1.0</span>
+      </div>
+      <input type="range" id="setting-smoothing" min="0.1" max="3.0" step="0.1" value="1.0">
+    </div>
+
+    <!-- Responsiveness (One Euro Filter beta) -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Responsiveness (Speed Lag)</span>
+        <span class="control-value" id="setting-responsiveness-val">0.02</span>
+      </div>
+      <input type="range" id="setting-responsiveness" min="0.001" max="0.08" step="0.001" value="0.02">
+    </div>
+
+    <!-- Webcam Offset Y -->
+    <div class="control-row">
+      <div class="control-label">
+        <span>Webcam Height Offset</span>
+        <span class="control-value"><span id="setting-webcam-y-val">11.0</span> cm</span>
+      </div>
+      <input type="number" id="setting-webcam-y" min="-30" max="40" step="0.5" value="11.0">
+      <button id="recenter-btn" class="recenter-btn">⌖ Recenter View (R)</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="switch-row">
+      <span>Debug HUD</span>
+      <input type="checkbox" id="setting-show-debug" class="toggle-checkbox" checked>
+    </div>
+
+    <div class="switch-row">
+      <span>Mouse Fallback Mode</span>
+      <input type="checkbox" id="setting-mouse-fallback" class="toggle-checkbox">
+    </div>
+  </div>
+
+  <!-- Debug Overlay -->
+  <div id="debug-overlay">
+    <canvas id="debug-canvas" width="160" height="120"></canvas>
+    <div class="debug-row">
+      <span class="debug-label">Status:</span>
+      <span id="debug-face-status" class="status-tag tag-red">WAITING</span>
+    </div>
+    <div class="debug-row">
+      <span class="debug-label">Quality:</span>
+      <span id="debug-quality-tier" style="color: var(--neon-yellow)">Medium</span>
+    </div>
+    <div class="debug-row">
+      <span class="debug-label">Render FPS:</span>
+      <span id="debug-render-fps" style="color: var(--neon-cyan)">--</span>
+    </div>
+    <div class="debug-row">
+      <span class="debug-label">Tracker FPS:</span>
+      <span id="debug-tracker-fps">--</span>
+    </div>
+    <div style="margin-top: 4px; font-size: 0.7rem; color: var(--text-muted);" id="debug-eye-pos">
+      X: 0.0 Y: 0.0 Z: 55.0 cm
+    </div>
+  </div>
+
+  <!-- Credits Button -->
+  <button id="credits-btn" title="View Attributions">© Credits</button>
+
+  <!-- Credits Modal -->
+  <div id="credits-modal" class="hidden">
+    <div class="credits-box">
+      <div class="credits-title">
+        <span>Credits & Attributions</span>
+        <button id="credits-close-btn" class="credits-close">&times;</button>
+      </div>
+
+      <div class="credit-item">
+        <div class="credit-name">Littlest Tokyo (3D Model)</div>
+        <div class="credit-author">By Glen Fox (<a href="https://artstation.com/glenatron" target="_blank" style="color: var(--neon-cyan)">artstation.com/glenatron</a>) • CC BY 4.0</div>
+      </div>
+
+      <div class="credit-item">
+        <div class="credit-name">Robot Expressive (3D Model & Rig)</div>
+        <div class="credit-author">By Tomás Laulhé (modifications by Don McCurdy) • CC0 1.0</div>
+      </div>
+
+      <div class="credit-item">
+        <div class="credit-name">3D Simplex & Curl Noise GLSL</div>
+        <div class="credit-author">By Ian McEwan, Stefan Gustavson, Ashima Arts • MIT License</div>
+      </div>
+
+      <div class="credit-item">
+        <div class="credit-name">GPGPU Boids Simulation & Techniques</div>
+        <div class="credit-author">By Three.js Authors & Contributors • MIT License</div>
+      </div>
+
+      <div class="credit-item">
+        <div class="credit-name">One Euro Filter Algorithm</div>
+        <div class="credit-author">By Géry Casiez, Nicolas Roussel, Daniel Vogel (CHI 2012)</div>
+      </div>
+
+      <div class="credit-item">
+        <div class="credit-name">MediaPipe FaceLandmarker</div>
+        <div class="credit-author">By Google Research & Tasks Vision • Apache 2.0</div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
