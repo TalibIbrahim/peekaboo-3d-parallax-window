@@ -15,8 +15,27 @@ export class AssetManager {
   }
 
   /**
+   * Helper to load a single GLTF URL
+   */
+  _fetchGLTF(targetUrl, onProgress) {
+    return new Promise((resolve, reject) => {
+      this.gltfLoader.load(
+        targetUrl,
+        (loaded) => resolve(loaded),
+        (xhr) => {
+          if (onProgress && xhr.total > 0) {
+            onProgress(targetUrl, Math.min(100, Math.round((xhr.loaded / xhr.total) * 100)));
+          }
+        },
+        (err) => reject(err)
+      );
+    });
+  }
+
+  /**
    * Loads a GLTF/GLB model from URL with caching and progress reporting.
-   * If loading fails, returns a procedural fallback model and logs a warning.
+   * If local URL fails (e.g. hosted on GitHub Pages), automatically falls back to CDN.
+   * If all fail, returns a procedural fallback model.
    */
   async loadGLTF(url, onProgress = null) {
     if (this.cache.has(url)) {
@@ -29,20 +48,33 @@ export class AssetManager {
       };
     }
 
-    try {
-      const gltf = await new Promise((resolve, reject) => {
-        this.gltfLoader.load(
-          url,
-          (loaded) => resolve(loaded),
-          (xhr) => {
-            if (onProgress && xhr.total > 0) {
-              onProgress(url, Math.min(100, Math.round((xhr.loaded / xhr.total) * 100)));
-            }
-          },
-          (err) => reject(err)
-        );
-      });
+    // Determine fallback CDN URLs if local asset is not in git repo (e.g. on GitHub Pages)
+    let cdnUrl = null;
+    if (url.includes('LittlestTokyo')) {
+      cdnUrl = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/LittlestTokyo.glb';
+    } else if (url.includes('RobotExpressive')) {
+      cdnUrl = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/RobotExpressive/RobotExpressive.glb';
+    }
 
+    const urlsToTry = [url];
+    if (cdnUrl && cdnUrl !== url) {
+      urlsToTry.push(cdnUrl);
+    }
+
+    let gltf = null;
+    let lastError = null;
+
+    for (const tryUrl of urlsToTry) {
+      try {
+        gltf = await this._fetchGLTF(tryUrl, onProgress);
+        break; // Successfully loaded!
+      } catch (err) {
+        lastError = err;
+        console.warn(`[AssetManager] Could not load "${tryUrl}". Trying next fallback if available.`);
+      }
+    }
+
+    if (gltf) {
       this.cache.set(url, {
         scene: gltf.scene,
         animations: gltf.animations || [],
@@ -54,27 +86,27 @@ export class AssetManager {
         animations: gltf.animations || [],
         isFallback: false
       };
-    } catch (err) {
-      console.warn(`[AssetManager] Failed to load "${url}". Using procedural fallback. Error:`, err.message);
-
-      // Create procedural fallback based on requested asset
-      const isRobot = url.toLowerCase().includes('robot');
-      const fallback = isRobot ? this._createProceduralRobot() : this._createProceduralIsland();
-
-      this.cache.set(url, {
-        scene: fallback.scene,
-        animations: fallback.animations || [],
-        isFallback: true,
-        missingUrl: url
-      });
-
-      return {
-        scene: fallback.scene.clone(true),
-        animations: fallback.animations || [],
-        isFallback: true,
-        missingUrl: url
-      };
     }
+
+    console.warn(`[AssetManager] Failed to load "${url}" from all sources. Using procedural fallback. Error:`, lastError?.message);
+
+    // Create procedural fallback based on requested asset
+    const isRobot = url.toLowerCase().includes('robot');
+    const fallback = isRobot ? this._createProceduralRobot() : this._createProceduralIsland();
+
+    this.cache.set(url, {
+      scene: fallback.scene,
+      animations: fallback.animations || [],
+      isFallback: true,
+      missingUrl: url
+    });
+
+    return {
+      scene: fallback.scene.clone(true),
+      animations: fallback.animations || [],
+      isFallback: true,
+      missingUrl: url
+    };
   }
 
   /**
