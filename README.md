@@ -1,5 +1,11 @@
 # Peekaboo — 3D Head-Tracked Living Window ("Virtual Fish-Tank VR")
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-00f0ff?style=for-the-badge&logo=github)](https://talibibrahim.github.io/peekaboo-3d-parallax-window/)
+[![Three.js](https://img.shields.io/badge/Three.js-r160-black?style=for-the-badge&logo=three.js)](https://threejs.org/)
+[![MediaPipe](https://img.shields.io/badge/MediaPipe-Tasks%20Vision-blue?style=for-the-badge&logo=google)](https://developers.google.com/mediapipe)
+
+**Live Web App**: [https://talibibrahim.github.io/peekaboo-3d-parallax-window/](https://talibibrahim.github.io/peekaboo-3d-parallax-window/)
+
 "Peekaboo" is a browser application that turns your screen into a real physical window into interactive 3D living worlds using webcam head tracking and off-axis (asymmetric frustum) perspective projection.
 
 Unlike simple "orbit camera" effects, the camera stays at your estimated eye position, always faces strictly forward along $-Z$, and dynamically recalculates the projection matrix each frame so the frustum edges lock to the four borders of your physical display. When you lean left, you see deeper behind the right side of objects; when you lean in, your field of view widens; and objects in the front zone float out in front of your screen.
