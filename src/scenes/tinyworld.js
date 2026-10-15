@@ -144,8 +144,9 @@ export default {
     root.add(bambooGroup);
 
     // 7. Load Littlest Tokyo Diorama (Authentic Model with Built-in Stone Island Base)
+    // Brought forward to Z = -18 cm so every street, lantern, and ramen counter is crisp and close
     const islandGroup = new T.Group();
-    islandGroup.position.set(0, -6.5, -28);
+    islandGroup.position.set(-1.0, -5.5, -18.0);
 
     let dioramaMixer = null;
 
@@ -153,8 +154,8 @@ export default {
       const gltf = await assets.loadGLTF('assets/models/LittlestTokyo.glb');
       const tokyoScene = gltf.scene;
 
-      // Scale model to proportional centerpiece size (~28 cm wide)
-      const scale = 0.024;
+      // Scale model to proportional centerpiece size (~33 cm wide)
+      const scale = 0.026;
       tokyoScene.scale.set(scale, scale, scale);
 
       // Centered at islandGroup origin
@@ -231,31 +232,41 @@ export default {
     }
     root.add(islandGroup);
 
-    // 8. Hero Robot Companion Placed in Foreground Corner (Safe Pop-Out Rect)
+    // 8. Hero Robot Companion Anchored on Island Dock Courtyard (Z = -15.5 cm)
+    // Directly integrated with the city so they share natural, unified parallax
     const robotPlatformGroup = new T.Group();
-    const platformX = Math.min(stage.safeMaxX * 0.72, 8.5);
-    const platformY = -stage.safeMaxY * 0.55;
-    const platformZ = 4.0;
-    robotPlatformGroup.position.set(platformX, platformY, platformZ);
+    robotPlatformGroup.position.set(6.8, -3.2, -15.5);
 
-    const discGeo = new T.CylinderGeometry(1.8, 1.4, 0.4, 24);
+    // Stone Dock Disc
+    const discGeo = new T.CylinderGeometry(1.6, 1.8, 0.4, 24);
     const discMat = new T.MeshStandardMaterial({
-      color: 0x1a2032,
-      metalness: 0.85,
-      roughness: 0.25
+      color: 0x242838,
+      metalness: 0.6,
+      roughness: 0.45
     });
     const discMesh = new T.Mesh(discGeo, discMat);
     discMesh.position.y = -0.2;
     robotPlatformGroup.add(discMesh);
 
-    const edgeRingGeo = new T.TorusGeometry(1.75, 0.05, 12, 32);
+    // Stone Pillar connecting pad into the island rock
+    const pillarGeo = new T.CylinderGeometry(0.8, 1.2, 3.5, 16);
+    const pillarMat = new T.MeshStandardMaterial({
+      color: 0x181a24,
+      metalness: 0.3,
+      roughness: 0.8
+    });
+    const pillarMesh = new T.Mesh(pillarGeo, pillarMat);
+    pillarMesh.position.y = -2.1;
+    robotPlatformGroup.add(pillarMesh);
+
+    // Glowing Cyan Trim Ring
+    const edgeRingGeo = new T.TorusGeometry(1.55, 0.04, 12, 32);
     edgeRingGeo.rotateX(Math.PI * 0.5);
     const edgeRingMat = new T.MeshBasicMaterial({ color: 0x00f0ff });
     const edgeRing = new T.Mesh(edgeRingGeo, edgeRingMat);
     edgeRing.position.y = 0.01;
     robotPlatformGroup.add(edgeRing);
 
-    stage.registerPopOut(discMesh);
     root.add(robotPlatformGroup);
 
     // 9. Load and Rig Hero Robot (RobotExpressive.glb)
@@ -296,10 +307,10 @@ export default {
       const gltf = await assets.loadGLTF('assets/models/RobotExpressive/RobotExpressive.glb');
       robotMesh = gltf.scene;
 
-      // Scale robot to ~6.5 cm tall for companion proportions
+      // Scale robot to ~5.2 cm tall for companion proportions with the diorama
       const rBox = new T.Box3().setFromObject(robotMesh);
       const rHeight = rBox.max.y - rBox.min.y;
-      const rScale = 6.5 / Math.max(rHeight, 0.001);
+      const rScale = 5.2 / Math.max(rHeight, 0.001);
       robotMesh.scale.set(rScale, rScale, rScale);
       robotMesh.position.set(0, 0, 0);
       robotMesh.rotation.y = -0.35;
@@ -340,7 +351,6 @@ export default {
       });
 
       robotPlatformGroup.add(robotMesh);
-      stage.registerPopOut(robotMesh);
 
       if (gltf.animations && gltf.animations.length > 0) {
         robotMixer = new T.AnimationMixer(robotMesh);
@@ -469,7 +479,56 @@ export default {
 
       update(dt, t, eye, stg) {
         if (dioramaMixer) dioramaMixer.update(dt);
-        if (robotMixer) robotMixer.update(dt);
+
+        if (robotMixer) {
+          robotMixer.update(dt);
+
+          if (jumpCooldown > 0) {
+            jumpCooldown -= dt;
+          }
+
+          // 1. Surprise jump reaction when user leans in close (eye.z < 34 cm)
+          if (eye.z < 34.0 && jumpCooldown <= 0 && (!activeAction || activeAction !== actions['jump'])) {
+            playAction('jump', 0.25, true);
+            jumpCooldown = 4.5;
+          }
+
+          // 2. Playful dance if the user remains still for > 12 seconds
+          const headMovement = Math.hypot(eye.x - lastHeadPos.x, eye.y - lastHeadPos.y, eye.z - lastHeadPos.z);
+          lastHeadPos = { x: eye.x, y: eye.y, z: eye.z };
+
+          if (headMovement < 0.25) {
+            stillHeadTimer += dt;
+            if (stillHeadTimer > 12.0 && (!activeAction || activeAction === actions['idle'])) {
+              playAction('dance', 0.35, true);
+              stillHeadTimer = 0;
+            }
+          } else {
+            stillHeadTimer = 0;
+          }
+        }
+
+        // Smooth, lifelike gaze tracking - pure, rock-solid mesh orientation
+        // Never modifies bone quaternions directly, preventing compounding and 360-degree spins
+        if (robotMesh) {
+          const robotWorldPos = new T.Vector3();
+          robotPlatformGroup.getWorldPosition(robotWorldPos);
+
+          const dx = eye.x - robotWorldPos.x;
+          const dy = eye.y - robotWorldPos.y;
+          const dz = eye.z - robotWorldPos.z;
+
+          // Clamped target yaw and pitch (strictly limits gaze range to natural viewing angles)
+          const targetYaw = Math.max(-0.55, Math.min(0.55, Math.atan2(dx, dz)));
+          const targetPitch = Math.max(-0.15, Math.min(0.12, -Math.atan2(dy, Math.hypot(dx, dz))));
+
+          smoothYaw += (targetYaw - smoothYaw) * Math.min(1.0, dt * 6.0);
+          smoothPitch += (targetPitch - smoothPitch) * Math.min(1.0, dt * 6.0);
+
+          // Absolute assignment on container mesh - 100% stable, zero 360 spinning, zero gimbal flips
+          robotMesh.rotation.y = -0.35 + smoothYaw;
+          robotMesh.rotation.x = smoothPitch;
+        }
 
         ffMat.uniforms.time.value = t;
         ffMat.uniforms.pxPerCm.value = stg.pxPerCm;
@@ -489,35 +548,12 @@ export default {
         for (const bird of birds) {
           bird.angle += dt * bird.speed;
           const bx = Math.cos(bird.angle) * bird.radius;
-          const bz = -28.0 + Math.sin(bird.angle) * bird.radius;
+          const bz = -18.0 + Math.sin(bird.angle) * bird.radius;
           const by = bird.height + Math.sin(t * 2.0 + bird.angle) * 1.2;
 
           bird.mesh.position.set(bx, by, bz);
           bird.mesh.rotation.y = -bird.angle + Math.PI * 0.5;
           bird.mesh.rotation.z = Math.sin(t * bird.flapSpeed) * 0.3;
-        }
-
-        // Smooth, lifelike gaze tracking (never compounds or twitches)
-        if (robotHeadBone) {
-          const robotWorldPos = new T.Vector3();
-          robotHeadBone.getWorldPosition(robotWorldPos);
-
-          const dx = eye.x - robotWorldPos.x;
-          const dy = eye.y - robotWorldPos.y;
-          const dz = eye.z - robotWorldPos.z;
-
-          // Clamped target yaw and pitch
-          const targetYaw = Math.max(-0.45, Math.min(0.45, Math.atan2(dx, dz) - 0.25));
-          const targetPitch = Math.max(-0.25, Math.min(0.20, -Math.atan2(dy, Math.hypot(dx, dz))));
-
-          smoothYaw += (targetYaw - smoothYaw) * 0.10;
-          smoothPitch += (targetPitch - smoothPitch) * 0.10;
-
-          // AnimationMixer evaluates clip keyframes on each frame.
-          // Adding gaze offset directly to Euler angles ensures zero compounding,
-          // perfectly smooth aim tracking, and no runaway gimbal flips.
-          robotHeadBone.rotation.y += smoothYaw;
-          robotHeadBone.rotation.x += smoothPitch;
         }
       },
 
@@ -528,15 +564,11 @@ export default {
           b.mesh.position.y = -stg.H * 0.5;
         });
 
-        const newX = Math.min(stg.safeMaxX * 0.72, 8.5);
-        const newY = -stg.safeMaxY * 0.55;
-        robotPlatformGroup.position.set(newX, newY, 4.0);
+        // Robot dock remains anchored to island dock courtyard
+        robotPlatformGroup.position.set(6.8, -3.2, -15.5);
       },
 
       dispose() {
-        stage.unregisterPopOut(discMesh);
-        if (robotMesh) stage.unregisterPopOut(robotMesh);
-
         envTexture.dispose();
         skyGeo.dispose();
         skyMat.dispose();
@@ -544,6 +576,8 @@ export default {
         sunMat.dispose();
         discGeo.dispose();
         discMat.dispose();
+        pillarGeo.dispose();
+        pillarMat.dispose();
         edgeRingGeo.dispose();
         edgeRingMat.dispose();
         cloudGeo.dispose();
