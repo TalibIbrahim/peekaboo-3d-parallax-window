@@ -3,285 +3,260 @@ import { FilesetResolver, FaceLandmarker } from 'https://cdn.jsdelivr.net/npm/@m
 const MEDIAPIPE_WASM_PATH = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 const MODEL_ASSET_PATH = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
+// FaceLandmarker mesh indices
+const LEFT_IRIS = 468;
+const RIGHT_IRIS = 473;
+const LEFT_EYE_OUTER = 33;
+const LEFT_EYE_INNER = 133;
+const RIGHT_EYE_OUTER = 263;
+const RIGHT_EYE_INNER = 362;
+
+/**
+ * Webcam head tracker.
+ *
+ * Runs MediaPipe FaceLandmarker once per *camera* frame (via
+ * requestVideoFrameCallback where available) instead of once per *render*
+ * frame, so inference never stalls rendering on frames where there is no new
+ * image, and every sample carries the timestamp of the frame it came from.
+ *
+ * Output samples are in centimetres, in webcam space: origin at the camera
+ * lens, +X to the viewer's right as seen by the screen, +Y up, +Z out of the
+ * screen toward the viewer.
+ */
 export class HeadTracker {
   constructor(options = {}) {
     this.hfovDeg = options.hfovDeg ?? 65.0;
     this.ipdCm = options.ipdCm ?? 6.3;
-    this.webcamOffsetX = options.webcamOffsetX ?? 0.0; // cm
-    this.webcamOffsetY = options.webcamOffsetY ?? 11.0; // cm (camera sits ~11cm above screen center)
 
     this.video = null;
+    this.stream = null;
     this.landmarker = null;
-    this.isInitialized = false;
     this.isRunning = false;
+    this.delegate = null;
 
-    this.lastVideoTime = -1;
-    this.lastDetectionTime = 0;
     this.faceFound = false;
+    this.lastFaceTime = 0;
+    this.irisPoints = null;
 
-    // Estimated camera-relative and screen-relative head positions
-    this.rawCameraPos = { x: 0, y: 0, z: 55 };
-    this.headPosition = { x: 0, y: 0, z: 55 };
-    this.defaultRestPosition = { x: 0, y: 0, z: 55 };
+    /** Latest sample in webcam space. `seq` increments on every new face sample. */
+    this.sample = { x: 0, y: 0, z: 55, t: 0, seq: 0 };
 
-    // Debug & stats tracking
-    this.irisPoints = null; // [leftIrisPx, rightIrisPx]
     this.trackerFps = 0;
-    this.trackerFrameCount = 0;
-    this.lastFpsUpdateTime = performance.now();
+    this.inferenceMs = 0;
+    this._frames = 0;
+    this._fpsWindowStart = performance.now();
+    this._lastVideoTime = -1;
+    this._lastTimestamp = 0;
+    this._rafId = 0;
+    this._vfcId = 0;
   }
 
   /**
-   * Initializes the webcam and MediaPipe FaceLandmarker.
-   * MUST be called inside or after a user gesture.
+   * Starts the webcam and the landmarker. Must be called from a user gesture.
+   * @param {(stage: string) => void} [onStage] progress callback for the UI
    */
-  async start() {
-    // 1. Setup hidden video element
-    this.video = document.createElement('video');
-    this.video.setAttribute('playsinline', '');
-    this.video.setAttribute('muted', '');
-    this.video.muted = true;
-    this.video.style.display = 'none';
-    document.body.appendChild(this.video);
-
-    // 2. Request user webcam stream
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'user'
-        },
-        audio: false
-      });
-    } catch (mediaError) {
-      if (mediaError.name === 'NotAllowedError' || mediaError.name === 'PermissionDeniedError') {
-        throw new Error('Webcam permission denied. Please allow camera access in your browser settings.');
-      } else if (mediaError.name === 'NotFoundError' || mediaError.name === 'DevicesNotFoundError') {
-        throw new Error('No camera found on your device.');
-      } else {
-        throw new Error(`Camera access error: ${mediaError.message || mediaError.name}`);
-      }
+  async start(onStage = () => {}) {
+    if (this.isRunning) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('This browser does not expose a camera API. Use a recent Chrome, Edge, Firefox or Safari over HTTPS or localhost.');
     }
 
-    this.video.srcObject = stream;
-    await new Promise((resolve) => {
-      this.video.onloadedmetadata = () => {
-        this.video.play().then(resolve);
-      };
-    });
+    onStage('Requesting camera…');
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 }, facingMode: 'user' },
+        audio: false
+      });
+    } catch (err) {
+      throw new Error(describeMediaError(err));
+    }
 
-    // 3. Initialize MediaPipe Vision Tasks
+    this.video = document.createElement('video');
+    this.video.playsInline = true;
+    this.video.muted = true;
+    this.video.srcObject = this.stream;
+    this.video.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(this.video);
+
+    // Load the model while the camera warms up.
+    onStage('Loading face model…');
+    const landmarkerPromise = this._createLandmarker();
+    await this.video.play().catch(() => {});
+    if (this.video.readyState < 2) {
+      await new Promise((resolve) => this.video.addEventListener('loadeddata', resolve, { once: true }));
+    }
+
+    try {
+      this.landmarker = await landmarkerPromise;
+    } catch (err) {
+      this.stop();
+      throw err;
+    }
+
+    this.isRunning = true;
+    this._scheduleNextFrame();
+  }
+
+  async _createLandmarker() {
     let vision;
     try {
       vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_PATH);
-    } catch (wasmError) {
-      throw new Error(`Failed to load MediaPipe WASM runtime: ${wasmError.message}`);
+    } catch (err) {
+      throw new Error(`Could not download the MediaPipe runtime (${err.message}). Check your connection.`);
     }
 
-    // Try GPU delegate first, fallback to CPU if it fails
+    const make = (delegate) => FaceLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: MODEL_ASSET_PATH, delegate },
+      runningMode: 'VIDEO',
+      numFaces: 1,
+      minFaceDetectionConfidence: 0.5,
+      minFacePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
     try {
-      this.landmarker = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: MODEL_ASSET_PATH,
-          delegate: 'GPU'
-        },
-        runningMode: 'VIDEO',
-        numFaces: 1
-      });
-    } catch (gpuError) {
-      console.warn('FaceLandmarker GPU delegate failed; falling back to CPU:', gpuError);
+      const lm = await make('GPU');
+      this.delegate = 'GPU';
+      return lm;
+    } catch (gpuErr) {
+      console.warn('[Tracker] GPU delegate unavailable, falling back to CPU:', gpuErr);
       try {
-        this.landmarker = await FaceLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: MODEL_ASSET_PATH,
-            delegate: 'CPU'
-          },
-          runningMode: 'VIDEO',
-          numFaces: 1
-        });
-      } catch (cpuError) {
-        throw new Error(`Failed to initialize FaceLandmarker model: ${cpuError.message}`);
+        const lm = await make('CPU');
+        this.delegate = 'CPU';
+        return lm;
+      } catch (cpuErr) {
+        throw new Error(`Could not initialise face tracking: ${cpuErr.message}`);
       }
     }
-
-    this.isInitialized = true;
-    this.isRunning = true;
-    this.lastDetectionTime = performance.now();
   }
 
-  /**
-   * Recenter calibration: sets offsets so current head position maps to (0, 0).
-   */
-  recenter() {
-    if (this.rawCameraPos) {
-      this.webcamOffsetX = this.rawCameraPos.x;
-      this.webcamOffsetY = -this.rawCameraPos.y;
-      return {
-        offsetX: this.webcamOffsetX,
-        offsetY: this.webcamOffsetY
-      };
-    }
-    return null;
-  }
-
-  /**
-   * Updates head tracking. Call this on every requestAnimationFrame.
-   * 
-   * @param {number} screenW - Current screen width in cm
-   * @param {number} screenH - Current screen height in cm
-   * @returns {{
-   *   position: {x: number, y: number, z: number},
-   *   faceFound: boolean,
-   *   irisPoints: Array<{x: number, y: number}>|null,
-   *   trackerFps: number,
-   *   video: HTMLVideoElement|null
-   * }}
-   */
-  update(screenW, screenH) {
-    const now = performance.now();
-
-    // Measure tracker FPS
-    if (now - this.lastFpsUpdateTime >= 1000) {
-      this.trackerFps = Math.round((this.trackerFrameCount * 1000) / (now - this.lastFpsUpdateTime));
-      this.trackerFrameCount = 0;
-      this.lastFpsUpdateTime = now;
-    }
-
-    if (!this.isRunning || !this.video || !this.landmarker || this.video.readyState < 2) {
-      this._handleNoFace(now, screenW, screenH);
-      return this._formatOutput();
-    }
-
-    // Only run inference when a new video frame is ready
-    if (this.video.currentTime !== this.lastVideoTime) {
-      this.lastVideoTime = this.video.currentTime;
-      this.trackerFrameCount++;
-
-      try {
-        const results = this.landmarker.detectForVideo(this.video, now);
-        if (results && results.faceLandmarks && results.faceLandmarks.length > 0) {
-          this._processLandmarks(results.faceLandmarks[0], screenW, screenH);
-          this.lastDetectionTime = now;
-          this.faceFound = true;
-        } else {
-          this._handleNoFace(now, screenW, screenH);
-        }
-      } catch (detectErr) {
-        console.warn('FaceLandmarker detection error:', detectErr);
-        this._handleNoFace(now, screenW, screenH);
-      }
+  _scheduleNextFrame() {
+    if (!this.isRunning) return;
+    if (this.video.requestVideoFrameCallback) {
+      this._vfcId = this.video.requestVideoFrameCallback(() => this._onFrame());
     } else {
-      // If frame didn't change, check timeout
-      if (now - this.lastDetectionTime > 500) {
-        this._handleNoFace(now, screenW, screenH);
+      this._rafId = requestAnimationFrame(() => this._onFrame());
+    }
+  }
+
+  _onFrame() {
+    if (!this.isRunning) return;
+    const video = this.video;
+
+    if (video.readyState >= 2 && video.currentTime !== this._lastVideoTime) {
+      this._lastVideoTime = video.currentTime;
+      // detectForVideo requires strictly increasing timestamps.
+      const now = Math.max(performance.now(), this._lastTimestamp + 0.001);
+      this._lastTimestamp = now;
+
+      try {
+        const result = this.landmarker.detectForVideo(video, now);
+        this.inferenceMs = this.inferenceMs * 0.9 + (performance.now() - now) * 0.1;
+        const face = result?.faceLandmarks?.[0];
+        if (face && this._processLandmarks(face, now)) {
+          this.faceFound = true;
+          this.lastFaceTime = now;
+        } else {
+          this.faceFound = false;
+          this.irisPoints = null;
+        }
+      } catch (err) {
+        console.warn('[Tracker] Detection error:', err);
+      }
+
+      this._frames++;
+      const elapsed = now - this._fpsWindowStart;
+      if (elapsed >= 1000) {
+        this.trackerFps = Math.round((this._frames * 1000) / elapsed);
+        this._frames = 0;
+        this._fpsWindowStart = now;
       }
     }
 
-    return this._formatOutput();
+    this._scheduleNextFrame();
   }
 
-  _processLandmarks(landmarks, screenW, screenH) {
+  _processLandmarks(lm, timestamp) {
     const vw = this.video.videoWidth || 640;
     const vh = this.video.videoHeight || 480;
 
-    let leftIrisNorm, rightIrisNorm;
-
-    // Landmark 468 is left iris center, 473 is right iris center
-    if (landmarks.length >= 478 && landmarks[468] && landmarks[473]) {
-      leftIrisNorm = landmarks[468];
-      rightIrisNorm = landmarks[473];
-    } else if (landmarks[33] && landmarks[263]) {
-      // Fallback: Eye corners (33 = left outer, 263 = right outer)
-      leftIrisNorm = landmarks[33];
-      rightIrisNorm = landmarks[263];
+    let left;
+    let right;
+    if (lm.length > RIGHT_IRIS) {
+      left = lm[LEFT_IRIS];
+      right = lm[RIGHT_IRIS];
+    } else if (lm.length > RIGHT_EYE_OUTER) {
+      // No iris refinement: use the centre of each eye's corners.
+      left = midpoint(lm[LEFT_EYE_OUTER], lm[LEFT_EYE_INNER]);
+      right = midpoint(lm[RIGHT_EYE_OUTER], lm[RIGHT_EYE_INNER]);
     } else {
-      return;
+      return false;
     }
 
-    // Convert normalized coordinates [0..1] to actual video pixel dimensions
-    const leftPx = { x: leftIrisNorm.x * vw, y: leftIrisNorm.y * vh };
-    const rightPx = { x: rightIrisNorm.x * vw, y: rightIrisNorm.y * vh };
-    this.irisPoints = [leftPx, rightPx];
+    const lx = left.x * vw;
+    const ly = left.y * vh;
+    const rx = right.x * vw;
+    const ry = right.y * vh;
+    this.irisPoints = [{ x: lx, y: ly }, { x: rx, y: ry }];
 
-    // Compute inter-pupillary distance in video pixels
-    const ipdPx = Math.max(Math.hypot(leftPx.x - rightPx.x, leftPx.y - rightPx.y), 1.0);
+    // Inter-pupillary distance in pixels. Landmark z shares x's scale (image
+    // width), so including it makes the measurement robust to head yaw: turning
+    // your head no longer shrinks the 2D distance and throws you "backwards".
+    const dz = (left.z - right.z) * vw;
+    const ipdPx = Math.max(Math.hypot(lx - rx, ly - ry, dz), 1);
 
-    // Pinhole camera focal length in pixels based on horizontal FOV
-    const hfovRad = (this.hfovDeg * Math.PI) / 180.0;
-    const fPx = (vw * 0.5) / Math.tan(hfovRad * 0.5);
+    // Pinhole model.
+    const fPx = (vw * 0.5) / Math.tan((this.hfovDeg * Math.PI) / 360);
+    const z = (fPx * this.ipdCm) / ipdPx;
+    if (!Number.isFinite(z) || z < 10 || z > 300) return false;
 
-    // Depth Z in cm: Z = f_px * ipd_cm / ipd_px
-    const rawZ = (fPx * this.ipdCm) / ipdPx;
-
-    // Midpoint between eyes in video pixels
-    const midPx = {
-      x: (leftPx.x + rightPx.x) * 0.5,
-      y: (leftPx.y + rightPx.y) * 0.5
-    };
-
-    // Calculate X and Y in webcam coordinates (in cm):
-    // X is negated because the webcam image is mirrored relative to real-world movement
-    // Y is negated because video pixel y increases downward while Three.js +Y is up
-    const rawX = -((midPx.x - vw * 0.5) * rawZ) / fPx;
-    const rawY = -((midPx.y - vh * 0.5) * rawZ) / fPx;
-
-    this.rawCameraPos = { x: rawX, y: rawY, z: rawZ };
-
-    // Convert to screen-centered coordinates:
-    // User looking at screen center has head below webcam: Y_cam ≈ -webcamOffsetY.
-    // Adding webcamOffsetY brings screenY to ~0.
-    const screenX = rawX - this.webcamOffsetX;
-    const screenY = rawY + this.webcamOffsetY;
-
-    // Clamp values as specified
-    const clampedZ = Math.min(Math.max(rawZ, 20.0), 120.0);
-    const clampedX = Math.min(Math.max(screenX, -screenW), screenW);
-    const clampedY = Math.min(Math.max(screenY, -screenH), screenH);
-
-    this.headPosition.x = clampedX;
-    this.headPosition.y = clampedY;
-    this.headPosition.z = clampedZ;
+    const mx = (lx + rx) * 0.5;
+    const my = (ly + ry) * 0.5;
+    // The camera image is un-mirrored: the viewer moving to their right moves
+    // left in the image, hence the negated X. Image Y grows downward.
+    const s = this.sample;
+    s.x = -((mx - vw * 0.5) * z) / fPx;
+    s.y = -((my - vh * 0.5) * z) / fPx;
+    s.z = z;
+    s.t = timestamp;
+    s.seq++;
+    return true;
   }
 
-  _handleNoFace(now, screenW, screenH) {
-    const elapsedSinceDetection = now - this.lastDetectionTime;
-    if (elapsedSinceDetection > 500) {
-      this.faceFound = false;
-      this.irisPoints = null;
-
-      // Slowly ease toward (0, 0, 55) over ~2 seconds
-      // Using smooth exponential decay factor ~0.03 per frame (~60fps)
-      const ease = 0.03;
-      this.headPosition.x += (this.defaultRestPosition.x - this.headPosition.x) * ease;
-      this.headPosition.y += (this.defaultRestPosition.y - this.headPosition.y) * ease;
-      this.headPosition.z += (this.defaultRestPosition.z - this.headPosition.z) * ease;
-    }
-  }
-
-  _formatOutput() {
-    return {
-      position: { ...this.headPosition },
-      rawCamera: { ...this.rawCameraPos },
-      faceFound: this.faceFound,
-      irisPoints: this.irisPoints,
-      trackerFps: this.trackerFps,
-      video: this.video
-    };
-  }
-
-  destroy() {
+  stop() {
     this.isRunning = false;
-    if (this.video && this.video.srcObject) {
-      const tracks = this.video.srcObject.getTracks();
-      tracks.forEach(track => track.stop());
-      this.video.remove();
-      this.video = null;
-    }
-    if (this.landmarker) {
-      this.landmarker.close();
-      this.landmarker = null;
-    }
+    if (this._vfcId && this.video?.cancelVideoFrameCallback) this.video.cancelVideoFrameCallback(this._vfcId);
+    if (this._rafId) cancelAnimationFrame(this._rafId);
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.video?.remove();
+    this.video = null;
+    this.landmarker?.close();
+    this.landmarker = null;
+    this.faceFound = false;
+    this.irisPoints = null;
+    this.trackerFps = 0;
+  }
+}
+
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+}
+
+function describeMediaError(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+      return 'Camera permission was denied. Allow camera access for this site (the icon in the address bar), then try again — or use mouse mode.';
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return 'No camera was found. Plug one in and try again, or use mouse mode.';
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'The camera is in use by another application. Close it and try again.';
+    case 'SecurityError':
+      return 'Camera access requires HTTPS (or localhost).';
+    default:
+      return `Camera error: ${err?.message || err?.name || 'unknown'}`;
   }
 }

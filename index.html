@@ -2,10 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Peekaboo — 3D Head-Tracked Living Window</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="Peekaboo turns your screen into a window: webcam head tracking plus off-axis projection make 3D worlds appear to sit behind (and in front of) the glass.">
+  <meta name="theme-color" content="#050714">
+  <title>Peekaboo — Head-Tracked 3D Window</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='90' height='90' x='5' y='5' rx='16' fill='%23050714' stroke='%2300f0ff' stroke-width='6'/><circle cx='50' cy='50' r='20' fill='%23ff007f'/><circle cx='50' cy='50' r='10' fill='%2300f0ff'/></svg>">
-  
+
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://storage.googleapis.com" crossorigin>
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" crossorigin>
+
   <script type="importmap">
   {
     "imports": {
@@ -18,628 +24,317 @@
   <style>
     :root {
       --bg-dark: #050714;
-      --panel-bg: rgba(10, 16, 36, 0.82);
-      --panel-border: rgba(0, 240, 255, 0.25);
+      --panel-bg: rgba(10, 16, 36, 0.84);
+      --panel-border: rgba(0, 240, 255, 0.22);
       --neon-cyan: #00f0ff;
       --neon-pink: #ff007f;
       --neon-green: #00ff88;
       --neon-yellow: #ffd700;
       --text-main: #e2e8f0;
       --text-muted: #8e9bb4;
-      --accent-glow: 0 0 16px rgba(0, 240, 255, 0.35);
+      --accent-glow: 0 0 16px rgba(0, 240, 255, 0.3);
+      --radius: 12px;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      user-select: none;
-      -webkit-user-select: none;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background-color: var(--bg-dark);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg-dark);
+      font-family: var(--font);
       color: var(--text-main);
+      -webkit-font-smoothing: antialiased;
+      overscroll-behavior: none;
+      touch-action: none;
     }
 
-    #canvas-container {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      z-index: 1;
-      display: block;
-    }
+    button, select, input { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    :focus-visible { outline: 2px solid var(--neon-cyan); outline-offset: 2px; }
 
-    /* Scene Transition Fade Overlay */
+    #canvas-container { position: fixed; inset: 0; z-index: 1; }
+    #gl { display: block; width: 100%; height: 100%; }
+
     #scene-transition-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: #000000;
-      opacity: 0;
-      pointer-events: none;
-      z-index: 90;
+      position: fixed; inset: 0; z-index: 90;
+      background: #000; opacity: 0; pointer-events: none;
       transition: opacity 0.35s ease;
     }
 
-    /* Scene Loading Progress Bar */
     #scene-loading-bar {
-      position: fixed;
-      top: 0;
-      left: 0;
-      height: 3px;
-      width: 0%;
-      background: linear-gradient(90deg, #00f0ff, #ff007f);
-      box-shadow: 0 0 8px #00f0ff;
-      z-index: 95;
-      display: none;
+      position: fixed; top: 0; left: 0; z-index: 95;
+      height: 3px; width: 0%; display: none;
+      background: linear-gradient(90deg, var(--neon-cyan), var(--neon-pink));
+      box-shadow: 0 0 8px var(--neon-cyan);
       transition: width 0.15s ease;
     }
-
     #scene-loading-label {
-      position: fixed;
-      top: 8px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 0.75rem;
-      font-family: monospace;
-      color: var(--neon-cyan);
-      background: rgba(5, 7, 20, 0.85);
-      padding: 3px 10px;
-      border-radius: 12px;
-      border: 1px solid var(--panel-border);
-      z-index: 95;
-      display: none;
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 95;
+      display: none; padding: 3px 12px; border-radius: 999px;
+      font: 0.75rem var(--mono); color: var(--neon-cyan);
+      background: rgba(5, 7, 20, 0.85); border: 1px solid var(--panel-border);
     }
 
-    /* Start Screen Card */
+    /* ---------------------------------------------------------------- start */
     #start-screen {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      z-index: 100;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: opacity 0.4s ease, visibility 0.4s ease;
+      position: fixed; inset: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.45s ease;
     }
-
-    #start-bg-canvas {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      z-index: 1;
-    }
-
-    #start-screen.fade-out {
-      opacity: 0;
-      pointer-events: none;
-    }
+    #start-screen.fade-out { opacity: 0; pointer-events: none; }
+    #start-bg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 
     .start-card {
-      position: relative;
-      z-index: 2;
-      width: 90%;
-      max-width: 500px;
-      padding: 40px 34px;
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 20px;
-      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.8), var(--accent-glow);
-      text-align: center;
-      backdrop-filter: blur(14px);
-      animation: cardAppear 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative; width: min(92vw, 520px); padding: 38px 34px 28px;
+      background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 22px;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.75), var(--accent-glow);
+      text-align: center; backdrop-filter: blur(14px);
+      animation: cardAppear 0.6s cubic-bezier(0.16, 1, 0.3, 1);
     }
-
-    @keyframes cardAppear {
-      from { transform: translateY(20px) scale(0.96); opacity: 0; }
-      to { transform: translateY(0) scale(1); opacity: 1; }
-    }
+    @keyframes cardAppear { from { transform: translateY(18px) scale(0.97); opacity: 0; } }
 
     .app-title {
-      font-size: 2.8rem;
-      font-weight: 900;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      background: linear-gradient(135deg, #00f0ff 0%, #ffffff 45%, #ff007f 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin-bottom: 12px;
-      text-shadow: 0 0 24px rgba(0, 240, 255, 0.5);
+      font-size: clamp(2.2rem, 7vw, 3rem); font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase;
+      background: linear-gradient(135deg, var(--neon-cyan) 0%, #fff 45%, var(--neon-pink) 100%);
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+      margin-bottom: 10px;
     }
+    .app-subtitle { font-size: 1.02rem; line-height: 1.55; color: var(--text-muted); margin-bottom: 24px; }
+    .app-subtitle strong { color: var(--text-main); font-weight: 600; }
 
-    .app-subtitle {
-      font-size: 1.05rem;
-      line-height: 1.55;
-      color: var(--text-muted);
-      margin-bottom: 26px;
-    }
-
-    .button-group {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
+    .button-group { display: flex; flex-direction: column; gap: 10px; }
     .primary-btn {
-      appearance: none;
-      border: none;
-      outline: none;
-      background: linear-gradient(135deg, #00b4db, #0083b0);
-      color: #ffffff;
-      padding: 14px 24px;
-      font-size: 1.05rem;
-      font-weight: 600;
-      border-radius: 10px;
-      cursor: pointer;
+      border: none; padding: 14px 24px; border-radius: 11px; font-size: 1.05rem; font-weight: 650; color: #fff;
+      background: linear-gradient(135deg, #00b4db, #0072ff);
       box-shadow: 0 4px 18px rgba(0, 180, 219, 0.4);
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      transition: transform 0.15s, box-shadow 0.2s, filter 0.2s;
     }
-
-    .primary-btn:hover {
-      background: linear-gradient(135deg, #00c6ff, #0072ff);
-      box-shadow: 0 6px 24px rgba(0, 240, 255, 0.6);
-      transform: translateY(-1px);
-    }
-
-    .primary-btn:active {
-      transform: translateY(1px);
-    }
-
+    .primary-btn:hover:not(:disabled) { box-shadow: 0 6px 26px rgba(0, 240, 255, 0.55); transform: translateY(-1px); }
+    .primary-btn:disabled { filter: saturate(0.5) brightness(0.85); cursor: progress; }
     .secondary-btn {
-      appearance: none;
-      border: 1px solid rgba(255, 255, 255, 0.18);
-      background: rgba(255, 255, 255, 0.06);
-      color: var(--text-main);
-      padding: 12px 20px;
-      font-size: 0.95rem;
-      font-weight: 500;
-      border-radius: 10px;
-      cursor: pointer;
-      transition: all 0.2s ease;
+      border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.06);
+      padding: 12px 20px; border-radius: 11px; font-size: 0.95rem; font-weight: 500;
+      transition: background 0.2s, border-color 0.2s;
     }
+    .secondary-btn:hover { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.35); }
+    .highlight-action { border-color: var(--neon-cyan) !important; color: var(--neon-cyan) !important; background: rgba(0, 240, 255, 0.1) !important; }
 
-    .secondary-btn:hover {
-      background: rgba(255, 255, 255, 0.12);
-      border-color: rgba(255, 255, 255, 0.35);
-    }
-
-    .highlight-action {
-      border-color: var(--neon-cyan) !important;
-      color: var(--neon-cyan) !important;
-      background: rgba(0, 240, 255, 0.1) !important;
-      box-shadow: 0 0 12px rgba(0, 240, 255, 0.3) !important;
+    #start-status { margin-top: 12px; min-height: 1.2em; font-size: 0.85rem; color: var(--neon-cyan); visibility: hidden; }
+    .privacy-note { margin-top: 14px; font-size: 0.76rem; color: var(--text-muted); line-height: 1.5; }
+    .key-hint { margin-top: 10px; font-size: 0.76rem; color: var(--text-muted); }
+    kbd {
+      display: inline-block; min-width: 1.6em; padding: 1px 6px; border-radius: 5px; text-align: center;
+      font: 600 0.74rem var(--mono); color: var(--text-main);
+      background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.18); border-bottom-width: 2px;
     }
 
     .error-container {
-      margin-top: 18px;
-      padding: 12px;
-      border-radius: 8px;
-      background: rgba(255, 30, 80, 0.15);
-      border: 1px solid rgba(255, 30, 80, 0.4);
-      color: #ff8ca3;
-      font-size: 0.9rem;
-      display: none;
-      line-height: 1.4;
-      text-align: left;
+      display: none; margin-top: 16px; padding: 12px; border-radius: 9px; text-align: left; line-height: 1.45; font-size: 0.9rem;
+      background: rgba(255, 30, 80, 0.14); border: 1px solid rgba(255, 30, 80, 0.4); color: #ff9db0;
     }
-
     .spinner {
-      display: none;
-      width: 22px;
-      height: 22px;
-      border: 3px solid rgba(255, 255, 255, 0.3);
-      border-radius: 50%;
-      border-top-color: #ffffff;
+      display: none; width: 18px; height: 18px; border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.3); border-top-color: #fff;
       animation: spin 0.8s linear infinite;
     }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
+    /* ------------------------------------------------------------------ HUD */
+    .hud { transition: opacity 0.6s ease; }
+    body:not(.running) .hud { display: none; }
+    body.idle .hud { opacity: 0; pointer-events: none; }
+    body.idle, body.idle * { cursor: none !important; }
+    body.kiosk .hud, body.kiosk #tracking-pill { display: none !important; }
 
-    /* Top Navigation HUD */
-    #top-nav {
-      position: fixed;
-      top: 14px;
-      right: 16px;
-      z-index: 50;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .glass {
+      background: var(--panel-bg); border: 1px solid var(--panel-border);
+      backdrop-filter: blur(10px); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
     }
 
     #scene-hud-picker {
-      position: fixed;
-      top: 14px;
-      left: 16px;
-      z-index: 50;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 10px;
-      padding: 6px 12px;
-      backdrop-filter: blur(10px);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      position: fixed; top: 14px; left: 16px; z-index: 50;
+      display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px; border-radius: 11px;
     }
-
-    #hud-scene-title {
-      font-size: 0.95rem;
-      font-weight: 700;
-      color: var(--neon-cyan);
-      letter-spacing: 0.05em;
-    }
-
+    #hud-scene-title { font-size: 0.95rem; font-weight: 700; color: var(--neon-cyan); letter-spacing: 0.04em; white-space: nowrap; }
     .hud-select {
-      background: rgba(0, 0, 0, 0.4);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 6px;
-      color: #ffffff;
-      padding: 5px 8px;
-      font-size: 0.85rem;
-      outline: none;
-      cursor: pointer;
+      background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 7px;
+      padding: 5px 8px; font-size: 0.85rem; cursor: pointer;
     }
+    .hud-select option { background: #0a1024; }
 
-    .hud-select:focus {
-      border-color: var(--neon-cyan);
-    }
-
+    #top-nav { position: fixed; top: 14px; right: 16px; z-index: 50; display: flex; gap: 8px; }
     .icon-btn {
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      color: var(--text-main);
-      border-radius: 8px;
-      padding: 8px 12px;
-      font-size: 0.9rem;
-      font-weight: 500;
-      cursor: pointer;
-      backdrop-filter: blur(8px);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-      transition: all 0.2s;
-      display: flex;
-      align-items: center;
-      gap: 6px;
+      border-radius: 9px; padding: 8px 12px; font-size: 0.88rem; font-weight: 500;
+      display: flex; align-items: center; gap: 6px; transition: border-color 0.2s, box-shadow 0.2s;
     }
+    .icon-btn:hover { border-color: var(--neon-cyan); box-shadow: 0 0 10px rgba(0, 240, 255, 0.35); }
 
-    .icon-btn:hover {
-      border-color: var(--neon-cyan);
-      box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+    #credits-btn {
+      position: fixed; bottom: 16px; right: 16px; z-index: 50;
+      padding: 6px 10px; border-radius: 8px; font-size: 0.78rem; color: var(--text-muted);
     }
+    #credits-btn:hover { color: #fff; border-color: var(--neon-cyan); }
 
-    /* Settings Panel */
+    /* Scene title card that fades in on every scene change */
+    #scene-card {
+      position: fixed; left: 50%; bottom: 12vh; transform: translateX(-50%); z-index: 40;
+      text-align: center; pointer-events: none; opacity: 0;
+      text-shadow: 0 2px 18px rgba(0, 0, 0, 0.9);
+    }
+    #scene-card.show { animation: sceneCard 4.2s ease forwards; }
+    @keyframes sceneCard {
+      0% { opacity: 0; transform: translate(-50%, 10px); }
+      12%, 70% { opacity: 1; transform: translate(-50%, 0); }
+      100% { opacity: 0; transform: translate(-50%, -6px); }
+    }
+    .scene-card-title { font-size: clamp(1.6rem, 4vw, 2.4rem); font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+    .scene-card-tagline { margin-top: 6px; font-size: 0.98rem; color: #cbd5e1; }
+    body.kiosk #scene-card { display: none; }
+
+    /* Tracking state indicator */
+    #tracking-pill {
+      position: fixed; top: 16px; left: 50%; transform: translate(-50%, -8px); z-index: 60;
+      padding: 6px 14px; border-radius: 999px; font-size: 0.82rem; font-weight: 600;
+      color: var(--neon-yellow); background: rgba(30, 24, 4, 0.82); border: 1px solid rgba(255, 215, 0, 0.45);
+      opacity: 0; pointer-events: none; transition: opacity 0.4s, transform 0.4s;
+      display: flex; align-items: center; gap: 8px;
+    }
+    #tracking-pill::before {
+      content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse { 50% { opacity: 0.25; } }
+    body.running #tracking-pill[data-state="searching"] { opacity: 1; transform: translate(-50%, 0); }
+
+    #toast {
+      position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 10px); z-index: 130;
+      max-width: min(90vw, 520px); padding: 8px 16px; border-radius: 999px; text-align: center;
+      font-size: 0.86rem; font-weight: 600; color: var(--neon-cyan);
+      background: rgba(5, 12, 28, 0.9); border: 1px solid var(--neon-cyan);
+      opacity: 0; pointer-events: none; transition: opacity 0.25s, transform 0.25s;
+    }
+    #toast.show { opacity: 1; transform: translate(-50%, 0); }
+    #toast.error { color: #ff9db0; border-color: rgba(255, 30, 80, 0.7); border-radius: 12px; }
+
+    /* ------------------------------------------------------------- settings */
     #settings-panel {
-      position: fixed;
-      top: 60px;
-      right: 16px;
-      width: 320px;
-      max-height: calc(100vh - 80px);
-      overflow-y: auto;
-      z-index: 50;
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 14px;
-      padding: 18px;
-      backdrop-filter: blur(14px);
+      position: fixed; top: 60px; right: 16px; bottom: 16px; z-index: 55; width: min(340px, calc(100vw - 32px));
+      overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px 18px; border-radius: 14px;
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7), var(--accent-glow);
       transition: transform 0.25s ease, opacity 0.25s ease, visibility 0.25s;
+      scrollbar-width: thin; scrollbar-color: rgba(0, 240, 255, 0.3) transparent;
     }
-
-    #settings-panel.hidden {
-      transform: translateX(340px);
-      opacity: 0;
-      pointer-events: none;
-      visibility: hidden;
+    #settings-panel.hidden { transform: translateX(24px); opacity: 0; visibility: hidden; pointer-events: none; }
+    .panel-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 1.05rem; font-weight: 700; color: var(--neon-cyan); }
+    .close-x { background: none; border: none; font-size: 1.4rem; line-height: 1; color: var(--text-muted); padding: 2px 6px; }
+    .close-x:hover { color: #fff; }
+    .section-title { margin: 16px 0 8px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); }
+    .control-row { margin-bottom: 11px; }
+    .control-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; font-size: 0.84rem; color: #b8c2d6; }
+    .control-value { color: var(--text-main); font: 600 0.82rem var(--mono); white-space: nowrap; }
+    .help-text { margin-top: 4px; font-size: 0.74rem; color: var(--text-muted); line-height: 1.4; }
+    input[type="range"] { width: 100%; accent-color: var(--neon-cyan); cursor: pointer; }
+    input[type="number"], #settings-panel select {
+      width: 100%; padding: 6px 10px; border-radius: 7px; font-size: 0.9rem;
+      background: rgba(0, 0, 0, 0.38); border: 1px solid rgba(255, 255, 255, 0.18);
     }
-
-    .panel-title {
-      font-size: 1.1rem;
-      font-weight: 700;
-      margin-bottom: 14px;
-      color: var(--neon-cyan);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .control-row {
-      margin-bottom: 12px;
-    }
-
-    .control-label {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-bottom: 6px;
-    }
-
-    .control-value {
-      color: var(--text-main);
-      font-weight: 600;
-      font-family: monospace;
-    }
-
-    input[type="range"] {
-      width: 100%;
-      height: 6px;
-      border-radius: 3px;
-      background: rgba(255, 255, 255, 0.15);
-      outline: none;
-      accent-color: var(--neon-cyan);
-      cursor: pointer;
-    }
-
-    input[type="number"], select {
-      width: 100%;
-      background: rgba(0, 0, 0, 0.4);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 6px;
-      color: #ffffff;
-      padding: 6px 10px;
-      font-size: 0.9rem;
-      outline: none;
-    }
-
-    input[type="number"]:focus, select:focus {
-      border-color: var(--neon-cyan);
-    }
-
-    .switch-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-top: 10px;
-      font-size: 0.88rem;
-    }
-
+    #settings-panel select option { background: #0a1024; }
+    .inline { display: flex; gap: 8px; }
+    .inline > input { flex: 1; min-width: 0; }
+    .switch-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 9px 0; font-size: 0.86rem; }
     .toggle-checkbox {
-      appearance: none;
-      width: 38px;
-      height: 20px;
-      background: rgba(255, 255, 255, 0.2);
-      border-radius: 10px;
-      position: relative;
-      cursor: pointer;
-      outline: none;
+      appearance: none; flex: none; width: 38px; height: 20px; border-radius: 10px; position: relative; cursor: pointer;
+      background: rgba(255, 255, 255, 0.2); transition: background 0.2s;
+    }
+    .toggle-checkbox:checked { background: var(--neon-cyan); }
+    .toggle-checkbox::after {
+      content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+      background: #fff; transition: transform 0.2s;
+    }
+    .toggle-checkbox:checked::after { transform: translateX(18px); }
+    .ghost-btn {
+      padding: 6px 10px; border-radius: 7px; font-size: 0.84rem; font-weight: 600; white-space: nowrap;
+      color: var(--neon-cyan); background: rgba(0, 240, 255, 0.12); border: 1px solid rgba(0, 240, 255, 0.5);
       transition: background 0.2s;
     }
+    .ghost-btn:hover { background: rgba(0, 240, 255, 0.25); }
+    .ghost-btn.wide { width: 100%; margin-top: 6px; padding: 8px; }
+    .ghost-btn.muted { color: var(--text-muted); border-color: rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.04); }
 
-    .toggle-checkbox:checked {
-      background: var(--neon-cyan);
-    }
-
-    .toggle-checkbox::after {
-      content: '';
-      position: absolute;
-      top: 2px;
-      left: 2px;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: white;
-      transition: transform 0.2s;
-    }
-
-    .toggle-checkbox:checked::after {
-      transform: translateX(18px);
-    }
-
-    .recenter-btn {
-      width: 100%;
-      background: rgba(0, 240, 255, 0.15);
-      border: 1px solid var(--neon-cyan);
-      color: var(--neon-cyan);
-      padding: 8px 12px;
-      font-size: 0.9rem;
-      font-weight: 600;
-      border-radius: 6px;
-      cursor: pointer;
-      margin-top: 6px;
-      transition: all 0.2s;
-    }
-
-    .recenter-btn:hover {
-      background: rgba(0, 240, 255, 0.3);
-      box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
-    }
-
-    .divider {
-      height: 1px;
-      background: rgba(255, 255, 255, 0.1);
-      margin: 14px 0;
-    }
-
-    /* Bottom-Left Debug Overlay */
+    /* ------------------------------------------------------------ debug HUD */
     #debug-overlay {
-      position: fixed;
-      bottom: 16px;
-      left: 16px;
-      z-index: 50;
-      width: 176px;
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 10px;
-      padding: 8px;
-      backdrop-filter: blur(10px);
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-      font-size: 0.74rem;
-      font-family: monospace;
-      color: var(--text-main);
+      position: fixed; bottom: 16px; left: 16px; z-index: 50; width: 196px; padding: 8px; border-radius: 10px;
+      font: 0.72rem var(--mono);
     }
+    #debug-overlay.hidden { display: none; }
+    #debug-canvas { display: block; width: 180px; height: 135px; margin-bottom: 6px; border-radius: 6px; background: #000; border: 1px solid rgba(255, 255, 255, 0.12); }
+    .debug-row { display: flex; justify-content: space-between; gap: 6px; margin-bottom: 2px; }
+    .debug-label { color: var(--text-muted); }
+    .status-tag { font-size: 0.66rem; font-weight: 700; padding: 1px 5px; border-radius: 3px; }
+    .tag-green { background: rgba(0, 255, 136, 0.18); color: var(--neon-green); border: 1px solid rgba(0, 255, 136, 0.4); }
+    .tag-red { background: rgba(255, 0, 85, 0.18); color: var(--neon-pink); border: 1px solid rgba(255, 0, 85, 0.4); }
+    .tag-mouse { background: rgba(255, 215, 0, 0.18); color: var(--neon-yellow); border: 1px solid rgba(255, 215, 0, 0.4); }
 
-    #debug-canvas {
-      width: 160px;
-      height: 120px;
-      border-radius: 6px;
-      background: #000;
-      display: block;
-      margin-bottom: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.15);
+    /* --------------------------------------------------------------- modals */
+    .modal {
+      position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; padding: 16px;
+      background: rgba(4, 7, 18, 0.78); backdrop-filter: blur(8px);
     }
-
-    .debug-row {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 2px;
+    .modal.hidden { display: none; }
+    .modal-box {
+      width: min(560px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; padding: 22px 24px; border-radius: 16px;
+      background: var(--panel-bg); border: 1px solid var(--panel-border); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
+      font-size: 0.9rem; line-height: 1.6;
     }
+    .modal-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 1.2rem; font-weight: 700; color: var(--neon-cyan); }
+    .credit-item { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+    .credit-name { font-weight: 600; }
+    .credit-author { color: var(--text-muted); font-size: 0.82rem; }
+    .credit-author a, .modal-box a { color: var(--neon-cyan); }
 
-    .debug-label {
-      color: var(--text-muted);
+    .keys { display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; align-items: center; }
+    .keys dt { text-align: right; white-space: nowrap; }
+    .keys dd { color: #c3cbe0; }
+    .tips { margin-top: 16px; padding-left: 18px; color: #c3cbe0; }
+    .tips li { margin-bottom: 4px; }
+
+    /* Card calibration */
+    #calib-modal .modal-box { width: min(720px, 100%); text-align: center; }
+    .calib-stage { display: flex; align-items: center; justify-content: center; min-height: 260px; margin: 14px 0; }
+    #calib-card {
+      position: relative; border-radius: 4.2%/6.6%;
+      background: linear-gradient(135deg, rgba(0, 240, 255, 0.25), rgba(255, 0, 127, 0.25));
+      border: 2px solid var(--neon-cyan); box-shadow: 0 0 24px rgba(0, 240, 255, 0.3);
     }
-
-    .status-tag {
-      display: inline-block;
-      font-size: 0.68rem;
-      font-weight: bold;
-      padding: 1px 4px;
-      border-radius: 3px;
+    #calib-card::before {
+      content: ''; position: absolute; left: 9%; top: 34%; width: 15%; height: 22%; border-radius: 3px;
+      background: linear-gradient(135deg, #e8c66a, #b8902f); opacity: 0.8;
     }
-
-    .tag-green {
-      background: rgba(0, 255, 136, 0.2);
-      color: var(--neon-green);
-      border: 1px solid rgba(0, 255, 136, 0.4);
+    #calib-handle {
+      position: absolute; right: -11px; bottom: -11px; width: 22px; height: 22px; border-radius: 50%;
+      background: var(--neon-cyan); border: 3px solid #04121a; cursor: nwse-resize; touch-action: none;
     }
+    .calib-controls { display: flex; align-items: center; gap: 12px; }
+    .calib-controls input { flex: 1; }
+    #card-diagonal { min-width: 4ch; font: 700 1rem var(--mono); color: var(--neon-cyan); }
 
-    .tag-red {
-      background: rgba(255, 0, 85, 0.2);
-      color: var(--neon-pink);
-      border: 1px solid rgba(255, 0, 85, 0.4);
+    @media (max-width: 640px) {
+      #scene-hud-picker { max-width: calc(100vw - 32px - 176px); padding: 5px 6px; }
+      #scene-hud-picker .hud-select { max-width: 100%; }
+      #hud-scene-title { display: none; }
+      .icon-btn .label { display: none; }
+      #debug-overlay { transform: scale(0.85); transform-origin: bottom left; }
     }
-
-    .tag-mouse {
-      background: rgba(255, 215, 0, 0.2);
-      color: var(--neon-yellow);
-      border: 1px solid rgba(255, 215, 0, 0.4);
+    @media (hover: none) {
+      .key-hint { display: none; }
     }
-
-    /* Credits Button & Modal */
-    #credits-btn {
-      position: fixed;
-      bottom: 16px;
-      right: 16px;
-      z-index: 50;
-      background: rgba(10, 16, 36, 0.7);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      color: var(--text-muted);
-      border-radius: 8px;
-      padding: 6px 10px;
-      font-size: 0.8rem;
-      cursor: pointer;
-      backdrop-filter: blur(6px);
-      transition: all 0.2s;
-    }
-
-    #credits-btn:hover {
-      color: #fff;
-      border-color: var(--neon-cyan);
-    }
-
-    #credits-modal {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: rgba(4, 7, 18, 0.85);
-      backdrop-filter: blur(8px);
-      z-index: 120;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: opacity 0.2s;
-    }
-
-    #credits-modal.hidden {
-      display: none;
-    }
-
-    .credits-box {
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 14px;
-      width: 90%;
-      max-width: 520px;
-      padding: 24px;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
-      font-size: 0.9rem;
-      line-height: 1.6;
-    }
-
-    .credits-title {
-      font-size: 1.25rem;
-      font-weight: 700;
-      color: var(--neon-cyan);
-      margin-bottom: 12px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .credits-close {
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      font-size: 1.4rem;
-      cursor: pointer;
-    }
-
-    .credits-close:hover {
-      color: #fff;
-    }
-
-    .credit-item {
-      margin-bottom: 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      padding-bottom: 8px;
-    }
-
-    .credit-name {
-      font-weight: 600;
-      color: #fff;
-    }
-
-    .credit-author {
-      color: var(--text-muted);
-      font-size: 0.82rem;
-    }
-
-    /* Gallery status toast */
-    #gallery-status-toast {
-      position: fixed;
-      top: 54px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0, 240, 255, 0.2);
-      border: 1px solid var(--neon-cyan);
-      color: var(--neon-cyan);
-      padding: 5px 14px;
-      border-radius: 20px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      z-index: 60;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.3s;
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
     }
   </style>
 </head>
@@ -647,241 +342,230 @@
   <div id="canvas-container"></div>
   <div id="scene-transition-overlay"></div>
   <div id="scene-loading-bar"></div>
-  <div id="scene-loading-label">Loading Scene...</div>
-  <div id="gallery-status-toast">Gallery Playing</div>
+  <div id="scene-loading-label" role="status">Loading…</div>
+  <div id="tracking-pill" role="status" aria-live="polite">Looking for you…</div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="scene-card" aria-hidden="true">
+    <div class="scene-card-title"></div>
+    <div class="scene-card-tagline"></div>
+  </div>
 
-  <!-- Start Screen Modal -->
+  <!-- Start screen -->
   <div id="start-screen">
-    <canvas id="start-bg-canvas"></canvas>
+    <canvas id="start-bg-canvas" aria-hidden="true"></canvas>
     <div class="start-card">
       <h1 class="app-title">Peekaboo</h1>
       <p class="app-subtitle">
-        Turn your monitor into an alive 3D physical window with head tracking, off-axis projection, and responsive living worlds.
+        Your screen becomes a <strong>window</strong>. Your webcam follows your head, and the 3D world behind the glass shifts exactly as a real one would.
       </p>
 
       <div class="button-group">
         <button id="start-btn" class="primary-btn">
-          <span>Start Camera</span>
-          <div id="loading-spinner" class="spinner"></div>
+          <span>Start with camera</span>
+          <span id="loading-spinner" class="spinner" aria-hidden="true"></span>
         </button>
-
-        <button id="mouse-mode-btn" class="secondary-btn">
-          Try with Mouse Fallback
-        </button>
+        <button id="mouse-mode-btn" class="secondary-btn">Try with the mouse instead</button>
       </div>
 
-      <div id="error-message" class="error-container"></div>
+      <div id="start-status" role="status" aria-live="polite"></div>
+      <div id="error-message" class="error-container" role="alert"></div>
 
-      <div style="margin-top: 16px; font-size: 0.78rem; color: var(--text-muted);">
-        Keys: <strong>1/2/3/0</strong> (Scenes) • <strong>F</strong> (Fullscreen) • <strong>P</strong> (Gallery) • <strong>H</strong> (Settings)
-      </div>
+      <p class="privacy-note">Video is processed on your device and never leaves this page. For the best effect, go fullscreen and sit about an arm's length away.</p>
+      <p class="key-hint"><kbd>1</kbd>–<kbd>3</kbd> scenes · <kbd>F</kbd> fullscreen · <kbd>S</kbd> settings · <kbd>?</kbd> help</p>
     </div>
   </div>
 
-  <!-- HUD Scene Selector (Top-Left) -->
-  <div id="scene-hud-picker">
-    <span id="hud-scene-title">Calibration</span>
-    <select id="scene-select" class="hud-select">
-      <option value="calibration">[0] Calibration Room</option>
-      <option value="abyss" selected>[1] Abyss</option>
-      <option value="tinyworld">[2] Tiny World</option>
-      <option value="starfall">[3] Starfall</option>
+  <!-- HUD: scene picker -->
+  <div id="scene-hud-picker" class="hud glass">
+    <span id="hud-scene-title">Abyss</span>
+    <select id="scene-select" class="hud-select" aria-label="Scene">
+      <option value="abyss">1 · Abyss</option>
+      <option value="tinyworld">2 · Tiny World</option>
+      <option value="starfall">3 · Starfall</option>
+      <option value="calibration">0 · Calibration Room</option>
     </select>
   </div>
 
-  <!-- Top Navigation (Top-Right) -->
-  <div id="top-nav">
-    <button id="fullscreen-btn" class="icon-btn" title="Toggle Fullscreen (F)">
-      ⛶ Fullscreen
-    </button>
-    <button id="settings-toggle-btn" class="icon-btn" title="Toggle Settings (H)">
-      ⚙ Settings
-    </button>
+  <!-- HUD: top-right buttons -->
+  <div id="top-nav" class="hud">
+    <button id="help-btn" class="icon-btn glass" title="Help & shortcuts (?)" aria-label="Help">?</button>
+    <button id="fullscreen-btn" class="icon-btn glass" title="Fullscreen (F)">⛶ <span class="label">Fullscreen</span></button>
+    <button id="settings-toggle-btn" class="icon-btn glass" title="Settings (S)" aria-expanded="false" aria-controls="settings-panel">⚙ <span class="label">Settings</span></button>
   </div>
 
-  <!-- Settings Panel -->
-  <div id="settings-panel" class="hidden">
+  <!-- Settings drawer -->
+  <aside id="settings-panel" class="hud glass hidden" aria-label="Settings">
     <div class="panel-title">
-      <span>Window Calibration</span>
-      <span style="font-size: 0.8rem; color: var(--text-muted);">[H]</span>
+      <span>Settings</span>
+      <button id="settings-close-btn" class="close-x" aria-label="Close settings">&times;</button>
     </div>
 
-    <!-- Quality Tier -->
+    <div class="section-title">Display</div>
     <div class="control-row">
-      <div class="control-label">
-        <span>Graphics Quality</span>
+      <div class="control-label"><span>Screen diagonal</span><span class="control-value"><span id="setting-screen-size-val">15.6</span>"</span></div>
+      <div class="inline">
+        <input type="number" id="setting-screen-size" min="7" max="100" step="0.1" value="15.6" aria-label="Screen diagonal in inches">
+        <button id="measure-btn" class="ghost-btn" title="Measure with a credit card">Measure…</button>
       </div>
-      <select id="quality-select">
-        <option value="Auto">Auto (Dynamic Scaling)</option>
-        <option value="High">High (Full Bloom, Shadows, High-Res)</option>
-        <option value="Medium" selected>Medium (Balanced)</option>
-        <option value="Low">Low (Bloom Off, High FPS)</option>
+      <div class="help-text">Getting this right makes depth feel real. Don't know it? Measure with any bank card.</div>
+    </div>
+    <div class="switch-row">
+      <span>Follow browser window position</span>
+      <input type="checkbox" id="setting-window-position" class="toggle-checkbox">
+    </div>
+    <div class="control-row">
+      <div class="control-label"><span>Graphics quality</span></div>
+      <select id="quality-select" aria-label="Graphics quality">
+        <option value="Auto">Auto (adapts to your GPU)</option>
+        <option value="High">High — full-res bloom, shadows</option>
+        <option value="Medium">Medium — balanced</option>
+        <option value="Low">Low — fastest</option>
       </select>
     </div>
-
-    <!-- Gallery Mode -->
     <div class="switch-row">
-      <span>Gallery Mode (Cycle 45s, P to pause)</span>
+      <span>Gallery mode (new scene every 45 s)</span>
       <input type="checkbox" id="setting-gallery-mode" class="toggle-checkbox">
     </div>
 
-    <!-- Edge Check Toggle -->
+    <div class="section-title">Head tracking</div>
     <div class="switch-row">
-      <span>Edge Check (Red Tint on Violation)</span>
-      <input type="checkbox" id="setting-edge-check" class="toggle-checkbox">
-    </div>
-
-    <div class="divider"></div>
-
-    <!-- Screen Size -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Screen Diagonal</span>
-        <span class="control-value"><span id="setting-screen-size-val">15.6</span>"</span>
-      </div>
-      <input type="number" id="setting-screen-size" min="10" max="65" step="0.1" value="15.6">
-    </div>
-
-    <!-- Horizontal FOV -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Webcam FOV (Horizontal)</span>
-        <span class="control-value"><span id="setting-hfov-val">65</span>°</span>
-      </div>
-      <input type="range" id="setting-hfov" min="50" max="90" step="1" value="65">
-    </div>
-
-    <!-- Interpupillary Distance (IPD) -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Interpupillary Distance</span>
-        <span class="control-value"><span id="setting-ipd-val">6.3</span> cm</span>
-      </div>
-      <input type="range" id="setting-ipd" min="5.5" max="7.5" step="0.1" value="6.3">
-    </div>
-
-    <!-- Parallax Strength -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Parallax Multiplier</span>
-        <span class="control-value"><span id="setting-parallax-val">1.0</span>x</span>
-      </div>
-      <input type="range" id="setting-parallax" min="0.5" max="2.5" step="0.1" value="1.0">
-    </div>
-
-    <!-- Curiosity Attractor for Starfall -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Starfall Curiosity Attraction</span>
-        <span class="control-value" id="setting-curiosity-val">0.3</span>
-      </div>
-      <input type="range" id="setting-curiosity" min="0.0" max="1.0" step="0.05" value="0.3">
-    </div>
-
-    <!-- Smoothing (One Euro Filter minCutoff) -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Smoothing (Jitter Reduction)</span>
-        <span class="control-value" id="setting-smoothing-val">1.0</span>
-      </div>
-      <input type="range" id="setting-smoothing" min="0.1" max="3.0" step="0.1" value="1.0">
-    </div>
-
-    <!-- Responsiveness (One Euro Filter beta) -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Responsiveness (Speed Lag)</span>
-        <span class="control-value" id="setting-responsiveness-val">0.02</span>
-      </div>
-      <input type="range" id="setting-responsiveness" min="0.001" max="0.08" step="0.001" value="0.02">
-    </div>
-
-    <!-- Webcam Offset Y -->
-    <div class="control-row">
-      <div class="control-label">
-        <span>Webcam Height Offset</span>
-        <span class="control-value"><span id="setting-webcam-y-val">11.0</span> cm</span>
-      </div>
-      <input type="number" id="setting-webcam-y" min="-30" max="40" step="0.5" value="11.0">
-      <button id="recenter-btn" class="recenter-btn">⌖ Recenter View (R)</button>
-    </div>
-
-    <div class="divider"></div>
-
-    <div class="switch-row">
-      <span>Debug HUD</span>
-      <input type="checkbox" id="setting-show-debug" class="toggle-checkbox" checked>
-    </div>
-
-    <div class="switch-row">
-      <span>Mouse Fallback Mode</span>
+      <span>Use mouse instead of camera</span>
       <input type="checkbox" id="setting-mouse-fallback" class="toggle-checkbox">
     </div>
+    <div class="control-row">
+      <div class="control-label"><span>Webcam height above screen centre</span><span class="control-value"><span id="setting-webcam-y-val">11.0</span> cm</span></div>
+      <input type="number" id="setting-webcam-y" min="-40" max="60" step="0.5" value="11.0" aria-label="Webcam height offset in centimetres">
+      <button id="recenter-btn" class="ghost-btn wide">⌖ Recenter on my head (R)</button>
+      <div class="help-text">Sit straight in front of the middle of the screen and press R.</div>
+    </div>
+    <div class="control-row">
+      <div class="control-label"><span>Webcam field of view</span><span class="control-value"><span id="setting-hfov-val">65</span>°</span></div>
+      <input type="range" id="setting-hfov" min="45" max="100" step="1" value="65">
+    </div>
+    <div class="control-row">
+      <div class="control-label"><span>Interpupillary distance</span><span class="control-value"><span id="setting-ipd-val">6.3</span> cm</span></div>
+      <input type="range" id="setting-ipd" min="5.2" max="7.6" step="0.1" value="6.3">
+      <div class="help-text">If the scene feels too deep or too shallow, adjust FOV first, then this.</div>
+    </div>
+    <div class="control-row">
+      <div class="control-label"><span>Smoothing (lower = steadier)</span><span class="control-value" id="setting-smoothing-val">1.0</span></div>
+      <input type="range" id="setting-smoothing" min="0.1" max="4.0" step="0.1" value="1.0">
+    </div>
+    <div class="control-row">
+      <div class="control-label"><span>Responsiveness to fast moves</span><span class="control-value" id="setting-responsiveness-val">0.050</span></div>
+      <input type="range" id="setting-responsiveness" min="0.000" max="0.200" step="0.005" value="0.05">
+    </div>
+    <div class="switch-row">
+      <span>Latency compensation (predict head motion)</span>
+      <input type="checkbox" id="setting-latency" class="toggle-checkbox">
+    </div>
+
+    <div class="section-title">Experience</div>
+    <div class="control-row">
+      <div class="control-label"><span>Parallax exaggeration</span><span class="control-value"><span id="setting-parallax-val">1.0</span>×</span></div>
+      <input type="range" id="setting-parallax" min="0.5" max="2.5" step="0.1" value="1.0">
+      <div class="help-text">1.0× is physically correct.</div>
+    </div>
+    <div class="control-row">
+      <div class="control-label"><span>Starfall: light follows your gaze</span><span class="control-value" id="setting-curiosity-val">0.30</span></div>
+      <input type="range" id="setting-curiosity" min="0" max="1" step="0.05" value="0.3">
+    </div>
+
+    <div class="section-title">Developer</div>
+    <div class="switch-row">
+      <span>Debug HUD (D)</span>
+      <input type="checkbox" id="setting-show-debug" class="toggle-checkbox">
+    </div>
+    <div class="switch-row">
+      <span>Edge check (tint pop-outs that clip the frame)</span>
+      <input type="checkbox" id="setting-edge-check" class="toggle-checkbox">
+    </div>
+    <button id="reset-settings-btn" class="ghost-btn wide muted">Reset all settings</button>
+  </aside>
+
+  <!-- Debug HUD -->
+  <div id="debug-overlay" class="hud glass hidden">
+    <canvas id="debug-canvas" width="180" height="135"></canvas>
+    <div class="debug-row"><span class="debug-label">Input</span><span id="debug-face-status" class="status-tag tag-red">—</span></div>
+    <div class="debug-row"><span class="debug-label">Quality</span><span id="debug-quality-tier" style="color: var(--neon-yellow)">—</span></div>
+    <div class="debug-row"><span class="debug-label">Render</span><span><span id="debug-render-fps" style="color: var(--neon-cyan)">—</span> fps</span></div>
+    <div class="debug-row"><span class="debug-label">Tracker</span><span id="debug-tracker-fps">—</span></div>
+    <div class="debug-row"><span class="debug-label">Eye</span><span id="debug-eye-pos">—</span></div>
+    <div class="debug-row"><span class="debug-label">Window</span><span id="debug-window">—</span></div>
   </div>
 
-  <!-- Debug Overlay -->
-  <div id="debug-overlay">
-    <canvas id="debug-canvas" width="160" height="120"></canvas>
-    <div class="debug-row">
-      <span class="debug-label">Status:</span>
-      <span id="debug-face-status" class="status-tag tag-red">WAITING</span>
-    </div>
-    <div class="debug-row">
-      <span class="debug-label">Quality:</span>
-      <span id="debug-quality-tier" style="color: var(--neon-yellow)">Medium</span>
-    </div>
-    <div class="debug-row">
-      <span class="debug-label">Render FPS:</span>
-      <span id="debug-render-fps" style="color: var(--neon-cyan)">--</span>
-    </div>
-    <div class="debug-row">
-      <span class="debug-label">Tracker FPS:</span>
-      <span id="debug-tracker-fps">--</span>
-    </div>
-    <div style="margin-top: 4px; font-size: 0.7rem; color: var(--text-muted);" id="debug-eye-pos">
-      X: 0.0 Y: 0.0 Z: 55.0 cm
+  <button id="credits-btn" class="hud glass" title="Attributions">© Credits</button>
+
+  <!-- Help -->
+  <div id="help-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <div class="modal-box">
+      <div class="modal-title"><span id="help-title">How to use Peekaboo</span><button class="close-x" data-close aria-label="Close">&times;</button></div>
+      <dl class="keys">
+        <dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>0</kbd></dt><dd>Abyss, Tiny World, Starfall, Calibration Room</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Previous / next scene</dd>
+        <dt><kbd>F</kbd></dt><dd>Fullscreen (strongly recommended)</dd>
+        <dt><kbd>R</kbd></dt><dd>Recenter: treat your current head position as "straight ahead"</dd>
+        <dt><kbd>M</kbd></dt><dd>Switch between camera and mouse</dd>
+        <dt><kbd>P</kbd></dt><dd>Gallery mode on/off</dd>
+        <dt><kbd>S</kbd> / <kbd>H</kbd></dt><dd>Settings</dd>
+        <dt><kbd>D</kbd></dt><dd>Debug HUD</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close panels</dd>
+      </dl>
+      <ul class="tips">
+        <li>Close one eye. The illusion works best for a single eye: with both open, your brain sees the screen is flat.</li>
+        <li>Move slowly side to side and toward the screen. Things behind the glass should stay "put" in the room.</li>
+        <li>Set your screen size in Settings (use <em>Measure…</em> if unsure). A wrong size makes depth feel off.</li>
+        <li>Good, even lighting on your face makes tracking much steadier.</li>
+        <li>In mouse mode, move the pointer to "lean" and scroll to move closer or further.</li>
+      </ul>
     </div>
   </div>
 
-  <!-- Credits Button -->
-  <button id="credits-btn" title="View Attributions">© Credits</button>
-
-  <!-- Credits Modal -->
-  <div id="credits-modal" class="hidden">
-    <div class="credits-box">
-      <div class="credits-title">
-        <span>Credits & Attributions</span>
-        <button id="credits-close-btn" class="credits-close">&times;</button>
+  <!-- Card calibration -->
+  <div id="calib-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="calib-title">
+    <div class="modal-box">
+      <div class="modal-title"><span id="calib-title">Measure your screen</span><button class="close-x" data-close aria-label="Close">&times;</button></div>
+      <p>Hold a bank card (or any standard ID card) flat against the screen and resize the outline until it matches the card exactly.</p>
+      <div class="calib-stage"><div id="calib-card"><div id="calib-handle" aria-hidden="true"></div></div></div>
+      <div class="calib-controls">
+        <input type="range" id="card-size" min="120" max="900" step="1" value="320" aria-label="Card width in pixels">
+        <span id="card-diagonal">—</span>
+        <button id="calib-apply" class="ghost-btn">Use this size</button>
       </div>
+    </div>
+  </div>
 
+  <!-- Credits -->
+  <div id="credits-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="credits-title">
+    <div class="modal-box">
+      <div class="modal-title"><span id="credits-title">Credits &amp; attributions</span><button class="close-x" data-close aria-label="Close">&times;</button></div>
       <div class="credit-item">
-        <div class="credit-name">Littlest Tokyo (3D Model)</div>
-        <div class="credit-author">By Glen Fox (<a href="https://artstation.com/glenatron" target="_blank" style="color: var(--neon-cyan)">artstation.com/glenatron</a>) • CC BY 4.0</div>
+        <div class="credit-name">Littlest Tokyo (3D model)</div>
+        <div class="credit-author">Glen Fox (<a href="https://www.artstation.com/glenatron" target="_blank" rel="noopener">artstation.com/glenatron</a>) · CC BY 4.0</div>
       </div>
-
       <div class="credit-item">
-        <div class="credit-name">Robot Expressive (3D Model & Rig)</div>
-        <div class="credit-author">By Tomás Laulhé (modifications by Don McCurdy) • CC0 1.0</div>
+        <div class="credit-name">Robot Expressive (3D model &amp; rig)</div>
+        <div class="credit-author">Tomás Laulhé, modifications by Don McCurdy · CC0 1.0</div>
       </div>
-
       <div class="credit-item">
-        <div class="credit-name">3D Simplex & Curl Noise GLSL</div>
-        <div class="credit-author">By Ian McEwan, Stefan Gustavson, Ashima Arts • MIT License</div>
+        <div class="credit-name">3D simplex noise GLSL</div>
+        <div class="credit-author">Ian McEwan, Stefan Gustavson, Ashima Arts · MIT</div>
       </div>
-
       <div class="credit-item">
-        <div class="credit-name">GPGPU Boids Simulation & Techniques</div>
-        <div class="credit-author">By Three.js Authors & Contributors • MIT License</div>
+        <div class="credit-name">three.js, GPUComputationRenderer</div>
+        <div class="credit-author">three.js authors · MIT</div>
       </div>
-
       <div class="credit-item">
-        <div class="credit-name">One Euro Filter Algorithm</div>
-        <div class="credit-author">By Géry Casiez, Nicolas Roussel, Daniel Vogel (CHI 2012)</div>
+        <div class="credit-name">1€ filter</div>
+        <div class="credit-author">Géry Casiez, Nicolas Roussel, Daniel Vogel (CHI 2012)</div>
       </div>
-
       <div class="credit-item">
-        <div class="credit-name">MediaPipe FaceLandmarker</div>
-        <div class="credit-author">By Google Research & Tasks Vision • Apache 2.0</div>
+        <div class="credit-name">MediaPipe Face Landmarker</div>
+        <div class="credit-author">Google · Apache 2.0</div>
+      </div>
+      <div class="credit-item">
+        <div class="credit-name">Off-axis projection for head-coupled displays</div>
+        <div class="credit-author">After Robert Kooima, "Generalized Perspective Projection" (2008), and Johnny Lee's Wii head-tracking demo (2007)</div>
       </div>
     </div>
   </div>

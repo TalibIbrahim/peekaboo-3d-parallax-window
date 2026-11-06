@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
 export class AssetManager {
   constructor() {
@@ -34,6 +35,12 @@ export class AssetManager {
 
   /**
    * Loads a GLTF/GLB model from URL with caching and progress reporting.
+   *
+   * Every call returns a fresh copy made with SkeletonUtils.clone. A plain
+   * Object3D.clone() would leave cloned SkinnedMeshes bound to the *original*
+   * skeleton's bones, so animations would play on bones nobody renders.
+   * Geometries, materials and textures are shared with the cached original;
+   * disposing them only frees GPU memory and three.js re-uploads on next use.
    * If local URL fails (e.g. hosted on GitHub Pages), automatically falls back to CDN.
    * If all fail, returns a procedural fallback model.
    */
@@ -42,7 +49,7 @@ export class AssetManager {
       const cached = this.cache.get(url);
       // Return a cloned scene graph with animations
       return {
-        scene: cached.scene.clone(true),
+        scene: cloneSkinned(cached.scene),
         animations: cached.animations,
         isFallback: cached.isFallback
       };
@@ -82,7 +89,7 @@ export class AssetManager {
       });
 
       return {
-        scene: gltf.scene.clone(true),
+        scene: cloneSkinned(gltf.scene),
         animations: gltf.animations || [],
         isFallback: false
       };
@@ -102,7 +109,7 @@ export class AssetManager {
     });
 
     return {
-      scene: fallback.scene.clone(true),
+      scene: cloneSkinned(fallback.scene),
       animations: fallback.animations || [],
       isFallback: true,
       missingUrl: url

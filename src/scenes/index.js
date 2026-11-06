@@ -5,62 +5,87 @@ import tinyworldScene from './tinyworld.js';
 import starfallScene from './starfall.js';
 
 export const SCENE_DEFINITIONS = [
-  calibrationScene, // index 0 (key 0)
-  abyssScene,       // index 1 (key 1)
-  tinyworldScene,   // index 2 (key 2)
-  starfallScene     // index 3 (key 3)
+  calibrationScene, // key 0
+  abyssScene,       // key 1
+  tinyworldScene,   // key 2
+  starfallScene     // key 3
 ];
 
+const FADE_MS = 350;
+
+/**
+ * Owns the active scene: creation, disposal, fade transitions, gallery mode.
+ *
+ * A scene definition is `{ id, name, tagline, create(ctx) }` where create()
+ * resolves to `{ root, background?, fog?, environment?, post?, update(dt, t, eye, stage, presence), onResize?(stage), dispose() }`.
+ */
 export class SceneManager {
   constructor(options) {
-    this.ctx = options.ctx; // { THREE, renderer, camera, stage, assets, quality, input, postPipeline }
+    this.ctx = options.ctx;
+    this.getQuality = options.getQuality || (() => 'Medium');
     this.onSceneChanged = options.onSceneChanged || null;
     this.onLoadingProgress = options.onLoadingProgress || null;
     this.onError = options.onError || null;
 
-    this.currentIndex = 0; // Default to Calibration
+    this.currentIndex = -1;
     this.activeInstance = null;
     this.isTransitioning = false;
+    this._pending = null;
 
-    // Gallery mode auto-cycling
     this.galleryMode = false;
-    this.galleryPaused = false;
-    this.galleryInterval = 45000; // 45 seconds
-    this.galleryTimer = null;
+    this.galleryInterval = 45000;
+    this._galleryTimer = null;
 
-    // Transition overlay for fade-to-black
     this.fadeOverlay = document.getElementById('scene-transition-overlay');
-
-    this._bindKeyboard();
   }
 
   get currentSceneDef() {
     return SCENE_DEFINITIONS[this.currentIndex];
   }
 
-  async loadInitialScene(initialId = 'calibration') {
-    const idx = SCENE_DEFINITIONS.findIndex(s => s.id === initialId);
-    this.currentIndex = idx >= 0 ? idx : 0;
-    await this._switchToScene(this.currentIndex, false);
+  indexOf(id) {
+    return SCENE_DEFINITIONS.findIndex((s) => s.id === id);
   }
 
-  async switchScene(indexOrId) {
-    let targetIdx = -1;
+  async loadInitialScene(initialId = 'abyss') {
+    const idx = this.indexOf(initialId);
+    await this._switchToScene(idx >= 0 ? idx : 1, false);
+  }
+
+  /** Switch by index (wraps) or id. Requests made mid-transition are queued, not dropped. */
+  switchScene(indexOrId) {
+    let target;
     if (typeof indexOrId === 'number') {
-      targetIdx = (indexOrId + SCENE_DEFINITIONS.length) % SCENE_DEFINITIONS.length;
+      target = ((indexOrId % SCENE_DEFINITIONS.length) + SCENE_DEFINITIONS.length) % SCENE_DEFINITIONS.length;
     } else {
-      targetIdx = SCENE_DEFINITIONS.findIndex(s => s.id === indexOrId);
+      target = this.indexOf(indexOrId);
     }
-    if (targetIdx === -1 || targetIdx === this.currentIndex || this.isTransitioning) return;
-    await this._switchToScene(targetIdx, true);
+    if (target < 0) return Promise.resolve();
+    if (this.isTransitioning) {
+      this._pending = target;
+      return Promise.resolve();
+    }
+    if (target === this.currentIndex) return Promise.resolve();
+    return this._switchToScene(target, true);
   }
 
   nextScene() {
-    this.switchScene(this.currentIndex + 1);
+    return this.switchScene((this._pending ?? this.currentIndex) + 1);
   }
 
   prevScene() {
-    this.switchScene(this.currentIndex - 1);
+    return this.switchScene((this._pending ?? this.currentIndex) - 1);
+  }
+
+  /** Rebuild the current scene, e.g. after a quality-tier change alters particle counts. */
+  reload() {
+    if (this.currentIndex < 0) return Promise.resolve();
+    if (this.isTransitioning) {
+      this._pending = this._pending ?? this.currentIndex;
+      this._forceReload = true;
+      return Promise.resolve();
+    }
+    return this._switchToScene(this.currentIndex, true);
   }
 
   setGalleryMode(enabled) {
@@ -68,23 +93,30 @@ export class SceneManager {
     this._resetGalleryTimer();
   }
 
-  toggleGalleryPause() {
-    this.galleryPaused = !this.galleryPaused;
-    console.log(`[Gallery Mode] ${this.galleryPaused ? 'Paused' : 'Resumed'}`);
-    this._resetGalleryTimer();
-    return this.galleryPaused;
+  _resetGalleryTimer() {
+    clearTimeout(this._galleryTimer);
+    this._galleryTimer = null;
+    if (this.galleryMode) {
+      this._galleryTimer = setTimeout(() => this.nextScene(), this.galleryInterval);
+    }
   }
 
-  _resetGalleryTimer() {
-    if (this.galleryTimer) {
-      clearInterval(this.galleryTimer);
-      this.galleryTimer = null;
+  async _fade(opacity) {
+    if (!this.fadeOverlay) return;
+    this.fadeOverlay.style.opacity = String(opacity);
+    await new Promise((r) => setTimeout(r, FADE_MS));
+  }
+
+  _disposeActive() {
+    if (!this.activeInstance) return;
+    this.ctx.stage?.clearPopOuts();
+    this.activeInstance.root?.removeFromParent();
+    try {
+      this.activeInstance.dispose?.();
+    } catch (err) {
+      console.warn('Error during scene disposal:', err);
     }
-    if (this.galleryMode && !this.galleryPaused) {
-      this.galleryTimer = setInterval(() => {
-        this.nextScene();
-      }, this.galleryInterval);
-    }
+    this.activeInstance = null;
   }
 
   async _switchToScene(targetIndex, withTransition = true) {
@@ -92,116 +124,69 @@ export class SceneManager {
     const def = SCENE_DEFINITIONS[targetIndex];
 
     try {
-      // 1. Fade out to black over 350 ms
-      if (withTransition && this.fadeOverlay) {
-        this.fadeOverlay.style.opacity = '1';
-        await new Promise(r => setTimeout(r, 350));
-      }
+      if (withTransition) await this._fade(1);
+      this._disposeActive();
 
-      // 2. Dispose existing scene
-      if (this.activeInstance) {
-        if (this.ctx.stage) {
-          this.ctx.stage.clearPopOuts();
-        }
-        if (this.activeInstance.root && this.activeInstance.root.parent) {
-          this.activeInstance.root.parent.remove(this.activeInstance.root);
-        }
-        try {
-          this.activeInstance.dispose();
-        } catch (dispErr) {
-          console.warn('Error during scene disposal:', dispErr);
-        }
-        this.activeInstance = null;
-      }
-
-      // 3. Instantiate target scene lazily
-      if (this.onLoadingProgress) this.onLoadingProgress(def.name, 10);
-
-      this.activeInstance = await def.create({
+      this.onLoadingProgress?.(def.name, 5);
+      const instance = await def.create({
         ...this.ctx,
-        onProgress: (url, pct) => {
-          if (this.onLoadingProgress) this.onLoadingProgress(def.name, pct);
-        }
+        quality: this.getQuality(),
+        onProgress: (_url, pct) => this.onLoadingProgress?.(def.name, pct)
       });
 
+      this.activeInstance = instance;
       this.currentIndex = targetIndex;
 
-      // 4. Attach root, background, fog, and post-processing
-      if (this.activeInstance.root) {
-        this.ctx.mainScene.add(this.activeInstance.root);
-      }
-      this.ctx.mainScene.background = this.activeInstance.background || new THREE.Color(0x050716);
-      this.ctx.mainScene.fog = this.activeInstance.fog || null;
+      if (instance.root) this.ctx.mainScene.add(instance.root);
+      this.ctx.mainScene.background = instance.background || new THREE.Color(0x050716);
+      this.ctx.mainScene.fog = instance.fog || null;
+      this.ctx.mainScene.environment = instance.environment || null;
+      this.ctx.postPipeline?.setPostConfig(instance.post || {});
 
-      if (this.ctx.postPipeline && this.activeInstance.post) {
-        this.ctx.postPipeline.setPostConfig(this.activeInstance.post);
-      }
+      // Compile shaders now, behind the black overlay, so the first visible frame doesn't hitch.
+      try {
+        this.ctx.renderer.compile(this.ctx.mainScene, this.ctx.camera);
+      } catch { /* compile is an optimisation only */ }
 
-      if (this.onSceneChanged) {
-        this.onSceneChanged(def, targetIndex);
-      }
-
+      this.onSceneChanged?.(def, targetIndex);
       this._resetGalleryTimer();
     } catch (err) {
       console.error(`Failed to load scene "${def.name}":`, err);
-      if (this.onError) {
-        this.onError(`Failed to load ${def.name}: ${err.message}. Falling back to Calibration.`);
-      }
-      // Safe fallback to Calibration scene if not already on it
+      this.onError?.(`Couldn't load ${def.name}: ${err.message}`);
       if (targetIndex !== 0) {
+        this._disposeActive();
+        this.isTransitioning = false;
         await this._switchToScene(0, false);
+        return;
       }
     } finally {
-      // 5. Fade in from black over 350 ms
-      if (withTransition && this.fadeOverlay) {
-        this.fadeOverlay.style.opacity = '0';
-        await new Promise(r => setTimeout(r, 350));
+      if (this.isTransitioning) {
+        this.onLoadingProgress?.(null, 100);
+        if (withTransition || this.fadeOverlay?.style.opacity === '1') await this._fade(0);
+        this.isTransitioning = false;
       }
-      if (this.onLoadingProgress) this.onLoadingProgress(null, 100);
-      this.isTransitioning = false;
+    }
+
+    // Run whatever was requested while we were busy.
+    if (this._pending !== null) {
+      const next = this._pending;
+      const force = this._forceReload;
+      this._pending = null;
+      this._forceReload = false;
+      if (next !== this.currentIndex || force) await this._switchToScene(next, true);
     }
   }
 
-  update(dt, t, eye) {
-    if (this.activeInstance && this.activeInstance.update) {
-      this.activeInstance.update(dt, t, eye, this.ctx.stage);
-    }
+  update(dt, t, eye, presence) {
+    this.activeInstance?.update?.(dt, t, eye, this.ctx.stage, presence);
   }
 
   onResize(stage) {
-    if (this.activeInstance && this.activeInstance.onResize) {
-      this.activeInstance.onResize(stage);
-    }
-  }
-
-  _bindKeyboard() {
-    window.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-      if (e.key === '0') this.switchScene(0);
-      else if (e.key === '1') this.switchScene(1);
-      else if (e.key === '2') this.switchScene(2);
-      else if (e.key === '3') this.switchScene(3);
-      else if (e.key === 'ArrowRight') this.nextScene();
-      else if (e.key === 'ArrowLeft') this.prevScene();
-      else if (e.key === 'p' || e.key === 'P') {
-        const isPaused = this.toggleGalleryPause();
-        // Notify UI toast if available
-        const statusEl = document.getElementById('gallery-status-toast');
-        if (statusEl) {
-          statusEl.textContent = isPaused ? 'Gallery Paused' : 'Gallery Playing';
-          statusEl.style.opacity = '1';
-          setTimeout(() => { statusEl.style.opacity = '0'; }, 1500);
-        }
-      }
-    });
+    this.activeInstance?.onResize?.(stage);
   }
 
   dispose() {
-    if (this.galleryTimer) clearInterval(this.galleryTimer);
-    if (this.activeInstance) {
-      this.activeInstance.dispose();
-      this.activeInstance = null;
-    }
+    clearTimeout(this._galleryTimer);
+    this._disposeActive();
   }
 }

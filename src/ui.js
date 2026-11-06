@@ -1,75 +1,113 @@
 /**
- * UI controller: manages Start Screen, Scene Selection, Quality Tiers,
- * Settings Drawer, Credits Overlay, Debug HUD, and Mouse Fallback.
+ * UI controller: start screen, HUD, settings drawer, help & credits overlays,
+ * card calibration, debug HUD and mouse/touch input.
+ *
+ * The UI owns the persisted settings object. It never touches the renderer or
+ * tracker directly; everything goes through the callbacks passed in.
  */
 
-const STORAGE_KEY = 'peekaboo_window_settings_v2';
+const STORAGE_KEY = 'peekaboo_window_settings_v3';
+const IDLE_HIDE_MS = 2800;
+const CARD_WIDTH_CM = 8.56; // ISO/IEC 7810 ID-1 (credit card, most ID cards)
+const CARD_ASPECT = 85.6 / 53.98;
+
+/** First-run guess at the screen size. Users can measure it properly in Settings. */
+function guessDiagonalInches() {
+  try {
+    const minSide = Math.min(window.screen.width || 0, window.screen.height || 0);
+    const touch = window.matchMedia('(pointer: coarse)').matches;
+    if (touch && minSide > 0 && minSide < 500) return 6.1;   // phone
+    if (touch && minSide > 0 && minSide < 1100) return 11;   // tablet
+  } catch { /* fall through */ }
+  return 15.6; // laptop
+}
 
 export const DEFAULT_SETTINGS = {
-  screenDiagonalInches: 15.6,
-  hfovDeg: 65.0,
+  screenDiagonalInches: guessDiagonalInches(),
+  trackWindowPosition: true,
+  hfovDeg: 65,
   ipdCm: 6.3,
+  webcamOffsetX: 0.0,
+  webcamOffsetY: 11.0,
+  /** When true, webcamOffsetY follows the screen size (camera centred on the top bezel). */
+  webcamOffsetAuto: true,
   parallaxMultiplier: 1.0,
   minCutoff: 1.0,
-  beta: 0.02,
-  webcamOffsetY: 11.0,
-  showDebug: true,
-  mouseFallback: false,
-  qualityTier: 'Medium',
+  beta: 0.05,
+  latencyCompensation: true,
+  showDebug: false,
+  qualityTier: 'Auto',
   galleryMode: false,
   edgeCheck: false,
   curiosity: 0.3
 };
 
+/** Range/number inputs: [element id, settings key, decimals]. */
+const NUMBER_BINDINGS = [
+  ['setting-screen-size', 'screenDiagonalInches', 1],
+  ['setting-hfov', 'hfovDeg', 0],
+  ['setting-ipd', 'ipdCm', 1],
+  ['setting-parallax', 'parallaxMultiplier', 1],
+  ['setting-smoothing', 'minCutoff', 1],
+  ['setting-responsiveness', 'beta', 3],
+  ['setting-webcam-y', 'webcamOffsetY', 1],
+  ['setting-curiosity', 'curiosity', 2]
+];
+
+const TOGGLE_BINDINGS = [
+  ['setting-gallery-mode', 'galleryMode'],
+  ['setting-edge-check', 'edgeCheck'],
+  ['setting-show-debug', 'showDebug'],
+  ['setting-window-position', 'trackWindowPosition'],
+  ['setting-latency', 'latencyCompensation']
+];
+
+const $ = (id) => document.getElementById(id);
+
 export class UIController {
   constructor(callbacks = {}) {
-    this.callbacks = callbacks;
+    this.cb = callbacks;
     this.settings = this.loadSettings();
+    this.inputMode = null; // 'camera' | 'mouse' once started
 
-    this.mouseNormalized = { x: 0, y: 0 };
-    this.isMouseFallbackActive = this.settings.mouseFallback;
+    // Pointer-driven eye for mouse mode, normalised to [-1, 1].
+    this.pointer = { x: 0, y: 0, inside: false };
+    this.mouseDepth = 60; // cm, adjustable with the wheel / pinch
 
-    // Elements
-    this.startScreen = document.getElementById('start-screen');
-    this.startBtn = document.getElementById('start-btn');
-    this.mouseModeBtn = document.getElementById('mouse-mode-btn');
-    this.errorMessage = document.getElementById('error-message');
-    this.spinner = document.getElementById('loading-spinner');
+    this._lastActivity = performance.now();
+    this._hudHidden = false;
+    this._debugTick = 0;
+    this._toastTimer = null;
 
-    this.settingsPanel = document.getElementById('settings-panel');
-    this.settingsToggleBtn = document.getElementById('settings-toggle-btn');
-    this.debugOverlay = document.getElementById('debug-overlay');
-    this.debugCanvas = document.getElementById('debug-canvas');
-    this.debugCtx = this.debugCanvas ? this.debugCanvas.getContext('2d') : null;
+    this.debugCanvas = $('debug-canvas');
+    this.debugCtx = this.debugCanvas?.getContext('2d') || null;
 
-    this.recenterBtn = document.getElementById('recenter-btn');
-    this.fullscreenBtn = document.getElementById('fullscreen-btn');
-
-    this.creditsModal = document.getElementById('credits-modal');
-    this.creditsBtn = document.getElementById('credits-btn');
-    this.creditsCloseBtn = document.getElementById('credits-close-btn');
-
-    this.sceneSelect = document.getElementById('scene-select');
-    this.qualitySelect = document.getElementById('quality-select');
-    this.galleryToggle = document.getElementById('setting-gallery-mode');
-    this.edgeCheckToggle = document.getElementById('setting-edge-check');
-    this.loadingBar = document.getElementById('scene-loading-bar');
-    this.loadingLabel = document.getElementById('scene-loading-label');
-
-    this._bindElements();
-    this._initKeyboardShortcuts();
-    this._initMouseTracking();
-    this._initAnimatedStartBackground();
+    this._bindStartScreen();
+    this._bindHud();
+    this._bindSettings();
+    this._bindOverlays();
+    this._bindCalibration();
+    this._bindKeyboard();
+    this._bindPointer();
+    this._bindIdle();
+    this._startBackground();
+    this._applyDebugVisibility();
   }
+
+  // ---------------------------------------------------------------- settings
 
   loadSettings() {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+      if (saved && typeof saved === 'object') {
+        const merged = { ...DEFAULT_SETTINGS };
+        for (const k of Object.keys(DEFAULT_SETTINGS)) {
+          if (typeof saved[k] === typeof DEFAULT_SETTINGS[k]) merged[k] = saved[k];
+        }
+        return merged;
       }
     } catch (e) {
-      console.warn('Could not read settings from localStorage:', e);
+      console.warn('Could not read settings:', e);
     }
     return { ...DEFAULT_SETTINGS };
   }
@@ -77,427 +115,551 @@ export class UIController {
   saveSettings() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings));
-    } catch (e) {
-      console.warn('Could not save settings to localStorage:', e);
-    }
+    } catch { /* storage may be unavailable (private mode); settings still work for this session */ }
   }
 
-  _bindElements() {
-    if (this.startBtn) {
-      this.startBtn.addEventListener('click', () => {
-        this.showLoading(true);
-        this.clearError();
-        if (this.callbacks.onStartCamera) {
-          this.callbacks.onStartCamera();
-        }
-      });
-    }
-
-    if (this.mouseModeBtn) {
-      this.mouseModeBtn.addEventListener('click', () => {
-        this.settings.mouseFallback = true;
-        this.isMouseFallbackActive = true;
-        this._updateInput('mouseFallback', true);
-        this.saveSettings();
-        this.hideStartScreen();
-        if (this.callbacks.onStartMouse) {
-          this.callbacks.onStartMouse();
-        }
-      });
-    }
-
-    if (this.settingsToggleBtn) {
-      this.settingsToggleBtn.addEventListener('click', () => {
-        this.toggleSettingsPanel();
-      });
-    }
-
-    if (this.recenterBtn) {
-      this.recenterBtn.addEventListener('click', () => {
-        if (this.callbacks.onRecenter) {
-          const newOffsets = this.callbacks.onRecenter();
-          if (newOffsets && typeof newOffsets.offsetY === 'number') {
-            this.settings.webcamOffsetY = Math.round(newOffsets.offsetY * 10) / 10;
-            this._updateInput('webcamOffsetY', this.settings.webcamOffsetY);
-            this.saveSettings();
-          }
-        }
-      });
-    }
-
-    if (this.fullscreenBtn) {
-      this.fullscreenBtn.addEventListener('click', () => {
-        this.toggleFullscreen();
-      });
-    }
-
-    // Credits modal
-    if (this.creditsBtn && this.creditsModal) {
-      this.creditsBtn.addEventListener('click', () => {
-        this.creditsModal.classList.remove('hidden');
-      });
-    }
-    if (this.creditsCloseBtn && this.creditsModal) {
-      this.creditsCloseBtn.addEventListener('click', () => {
-        this.creditsModal.classList.add('hidden');
-      });
-    }
-
-    // Scene picker in settings & HUD
-    if (this.sceneSelect) {
-      this.sceneSelect.addEventListener('change', (e) => {
-        if (this.callbacks.onSceneSelect) {
-          this.callbacks.onSceneSelect(e.target.value);
-        }
-      });
-    }
-
-    // Quality selector
-    if (this.qualitySelect) {
-      this.qualitySelect.value = this.settings.qualityTier;
-      this.qualitySelect.addEventListener('change', (e) => {
-        this.settings.qualityTier = e.target.value;
-        this.saveSettings();
-        if (this.callbacks.onQualitySelect) {
-          this.callbacks.onQualitySelect(e.target.value);
-        }
-      });
-    }
-
-    // Gallery mode
-    if (this.galleryToggle) {
-      this.galleryToggle.checked = this.settings.galleryMode;
-      this.galleryToggle.addEventListener('change', (e) => {
-        this.settings.galleryMode = e.target.checked;
-        this.saveSettings();
-        if (this.callbacks.onGalleryToggle) {
-          this.callbacks.onGalleryToggle(e.target.checked);
-        }
-      });
-    }
-
-    // Edge check toggle
-    if (this.edgeCheckToggle) {
-      this.edgeCheckToggle.checked = this.settings.edgeCheck;
-      this.edgeCheckToggle.addEventListener('change', (e) => {
-        this.settings.edgeCheck = e.target.checked;
-        this.saveSettings();
-        if (this.callbacks.onEdgeCheckToggle) {
-          this.callbacks.onEdgeCheckToggle(e.target.checked);
-        }
-      });
-    }
-
-    this._syncInputsWithSettings();
+  /** Update one or more settings from code (e.g. recenter, auto calibration) and sync the inputs. */
+  patchSettings(patch, { notify = true } = {}) {
+    Object.assign(this.settings, patch);
+    this.saveSettings();
+    this._syncInputs();
+    if (notify) this.cb.onSettingsChange?.(this.settings, Object.keys(patch));
   }
 
-  _syncInputsWithSettings() {
-    const bindNumber = (id, key, isFloat = true) => {
-      const el = document.getElementById(id);
-      const valEl = document.getElementById(`${id}-val`);
-      if (!el) return;
+  _syncInputs() {
+    for (const [id, key, decimals] of NUMBER_BINDINGS) {
+      const el = $(id);
+      if (!el) continue;
       el.value = this.settings[key];
-      if (valEl) valEl.textContent = this.settings[key];
+      const out = $(`${id}-val`);
+      if (out) out.textContent = Number(this.settings[key]).toFixed(decimals);
+    }
+    for (const [id, key] of TOGGLE_BINDINGS) {
+      const el = $(id);
+      if (el) el.checked = !!this.settings[key];
+    }
+    const q = $('quality-select');
+    if (q) q.value = this.settings.qualityTier;
+    const mouse = $('setting-mouse-fallback');
+    if (mouse) mouse.checked = this.inputMode === 'mouse';
+  }
 
-      el.addEventListener('input', (e) => {
-        const val = isFloat ? parseFloat(e.target.value) : parseInt(e.target.value, 10);
-        if (!isNaN(val)) {
-          this.settings[key] = val;
-          if (valEl) valEl.textContent = val;
-          this.saveSettings();
-          if (this.callbacks.onSettingsChange) {
-            this.callbacks.onSettingsChange(this.settings);
-          }
-        }
-      });
-    };
-
-    bindNumber('setting-screen-size', 'screenDiagonalInches', true);
-    bindNumber('setting-hfov', 'hfovDeg', false);
-    bindNumber('setting-ipd', 'ipdCm', true);
-    bindNumber('setting-parallax', 'parallaxMultiplier', true);
-    bindNumber('setting-smoothing', 'minCutoff', true);
-    bindNumber('setting-responsiveness', 'beta', true);
-    bindNumber('setting-webcam-y', 'webcamOffsetY', true);
-    bindNumber('setting-curiosity', 'curiosity', true);
-
-    const debugToggle = document.getElementById('setting-show-debug');
-    if (debugToggle) {
-      debugToggle.checked = this.settings.showDebug;
-      if (this.debugOverlay) {
-        this.debugOverlay.style.display = this.settings.showDebug ? 'block' : 'none';
-      }
-      debugToggle.addEventListener('change', (e) => {
-        this.settings.showDebug = e.target.checked;
-        if (this.debugOverlay) {
-          this.debugOverlay.style.display = this.settings.showDebug ? 'block' : 'none';
-        }
+  _bindSettings() {
+    for (const [id, key, decimals] of NUMBER_BINDINGS) {
+      const el = $(id);
+      if (!el) continue;
+      el.addEventListener('input', () => {
+        const v = parseFloat(el.value);
+        if (!Number.isFinite(v)) return;
+        const min = parseFloat(el.min);
+        const max = parseFloat(el.max);
+        const clamped = Math.min(Number.isFinite(max) ? max : v, Math.max(Number.isFinite(min) ? min : v, v));
+        this.settings[key] = clamped;
+        const out = $(`${id}-val`);
+        if (out) out.textContent = clamped.toFixed(decimals);
         this.saveSettings();
+        this.cb.onSettingsChange?.(this.settings, [key]);
       });
     }
 
-    const mouseToggle = document.getElementById('setting-mouse-fallback');
-    if (mouseToggle) {
-      mouseToggle.checked = this.settings.mouseFallback;
-      mouseToggle.addEventListener('change', (e) => {
-        this.settings.mouseFallback = e.target.checked;
-        this.isMouseFallbackActive = e.target.checked;
+    for (const [id, key] of TOGGLE_BINDINGS) {
+      $(id)?.addEventListener('change', (e) => {
+        this.settings[key] = e.target.checked;
         this.saveSettings();
-        if (this.callbacks.onSettingsChange) {
-          this.callbacks.onSettingsChange(this.settings);
-        }
+        if (key === 'showDebug') this._applyDebugVisibility();
+        this.cb.onSettingsChange?.(this.settings, [key]);
       });
     }
+
+    $('quality-select')?.addEventListener('change', (e) => {
+      this.settings.qualityTier = e.target.value;
+      this.saveSettings();
+      this.cb.onQualitySelect?.(e.target.value);
+    });
+
+    $('setting-mouse-fallback')?.addEventListener('change', (e) => {
+      this.cb.onInputModeChange?.(e.target.checked ? 'mouse' : 'camera');
+    });
+
+    $('recenter-btn')?.addEventListener('click', () => this.cb.onRecenter?.());
+    $('measure-btn')?.addEventListener('click', () => this.openCalibration());
+    $('reset-settings-btn')?.addEventListener('click', () => {
+      const keepQuality = this.settings.qualityTier;
+      this.patchSettings({ ...DEFAULT_SETTINGS, qualityTier: keepQuality });
+      this._applyDebugVisibility();
+      this.toast('Settings reset');
+    });
+
+    this._syncInputs();
   }
 
-  _updateInput(key, val) {
-    if (key === 'webcamOffsetY') {
-      const el = document.getElementById('setting-webcam-y');
-      const valEl = document.getElementById('setting-webcam-y-val');
-      if (el) el.value = val;
-      if (valEl) valEl.textContent = val;
-    } else if (key === 'mouseFallback') {
-      const el = document.getElementById('setting-mouse-fallback');
-      if (el) el.checked = val;
+  // ------------------------------------------------------------ start screen
+
+  _bindStartScreen() {
+    $('start-btn')?.addEventListener('click', () => this.cb.onStartCamera?.());
+    $('mouse-mode-btn')?.addEventListener('click', () => this.cb.onStartMouse?.());
+  }
+
+  setStartBusy(busy, label = '') {
+    const btn = $('start-btn');
+    if (btn) btn.disabled = busy;
+    const spinner = $('loading-spinner');
+    if (spinner) spinner.style.display = busy ? 'inline-block' : 'none';
+    const status = $('start-status');
+    if (status) {
+      status.textContent = label;
+      status.style.visibility = label ? 'visible' : 'hidden';
     }
   }
 
-  _initKeyboardShortcuts() {
-    window.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  hideStartScreen() {
+    const s = $('start-screen');
+    if (!s) return;
+    s.classList.add('fade-out');
+    setTimeout(() => { s.style.display = 'none'; }, 450);
+    document.body.classList.add('running');
+    this.poke();
+  }
 
-      if (e.key === 'f' || e.key === 'F') {
-        this.toggleFullscreen();
-      } else if (e.key === 'h' || e.key === 'H') {
-        this.toggleSettingsPanel();
-      } else if (e.key === 'r' || e.key === 'R') {
-        if (this.callbacks.onRecenter) {
-          const newOffsets = this.callbacks.onRecenter();
-          if (newOffsets && typeof newOffsets.offsetY === 'number') {
-            this.settings.webcamOffsetY = Math.round(newOffsets.offsetY * 10) / 10;
-            this._updateInput('webcamOffsetY', this.settings.webcamOffsetY);
-            this.saveSettings();
-          }
-        }
+  showError(msg) {
+    this.setStartBusy(false);
+    const startVisible = $('start-screen')?.style.display !== 'none';
+    if (startVisible) {
+      const el = $('error-message');
+      if (el) {
+        el.textContent = msg;
+        el.style.display = 'block';
       }
-    });
+      $('mouse-mode-btn')?.classList.add('highlight-action');
+    } else {
+      this.toast(msg, 6000, true);
+    }
   }
 
-  _initMouseTracking() {
-    window.addEventListener('mousemove', (e) => {
-      const nx = (e.clientX / window.innerWidth) * 2 - 1;
-      const ny = (e.clientY / window.innerHeight) * 2 - 1;
-      this.mouseNormalized.x = Math.max(-1, Math.min(1, nx));
-      this.mouseNormalized.y = Math.max(-1, Math.min(1, ny));
-    });
+  clearError() {
+    const el = $('error-message');
+    if (el) {
+      el.style.display = 'none';
+      el.textContent = '';
+    }
   }
 
-  /**
-   * Animated interactive background on the start screen inspired by react-bits.dev.
-   */
-  _initAnimatedStartBackground() {
-    const bgCanvas = document.getElementById('start-bg-canvas');
-    if (!bgCanvas) return;
-    const ctx = bgCanvas.getContext('2d');
+  setInputMode(mode) {
+    this.inputMode = mode;
+    document.body.dataset.input = mode;
+    this._syncInputs();
+  }
+
+  _startBackground() {
+    const canvas = $('start-bg-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
     const resize = () => {
-      bgCanvas.width = window.innerWidth;
-      bgCanvas.height = window.innerHeight;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(window.innerWidth * dpr);
+      canvas.height = Math.round(window.innerHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     window.addEventListener('resize', resize);
     resize();
 
-    let t = 0;
-    const draw = () => {
-      if (!this.startScreen || this.startScreen.style.display === 'none') return;
+    // A tiny off-axis "room" that follows the pointer: a preview of what the app does.
+    const draw = (time) => {
+      const start = $('start-screen');
+      if (!start || start.style.display === 'none') return;
       requestAnimationFrame(draw);
-      t += 0.02;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const t = reduceMotion ? 0 : time * 0.001;
+      ctx.fillStyle = '#04060f';
+      ctx.fillRect(0, 0, w, h);
 
-      ctx.fillStyle = '#050714';
-      ctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
-
-      const cols = 28;
-      const rows = 18;
-      const cellW = bgCanvas.width / cols;
-      const cellH = bgCanvas.height / rows;
+      const ex = this.pointer.x * 0.5 + Math.sin(t * 0.4) * 0.08;
+      const ey = this.pointer.y * 0.5 + Math.cos(t * 0.3) * 0.05;
+      const project = (x, y, z) => {
+        // z in [0, 1] = depth into the screen; vanishing point shifts opposite the eye
+        const k = 1 / (1 + z * 2.2);
+        const vx = -ex * w * 0.5;
+        const vy = -ey * h * 0.5;
+        return [w / 2 + (x * w * 0.5 - vx) * k + vx, h / 2 + (y * h * 0.5 - vy) * k + vy];
+      };
 
       ctx.lineWidth = 1;
-      for (let r = 0; r <= rows; r++) {
-        for (let c = 0; c <= cols; c++) {
-          const x = c * cellW;
-          const y = r * cellH;
-          const dist = Math.hypot(x - bgCanvas.width * 0.5, y - bgCanvas.height * 0.5);
-          const wave = Math.sin(dist * 0.015 - t) * 0.5 + 0.5;
-
-          ctx.fillStyle = `rgba(0, 240, 255, ${wave * 0.18})`;
+      for (let i = 0; i <= 12; i++) {
+        const z = i / 12;
+        const a = 0.05 + (1 - z) * 0.18;
+        ctx.strokeStyle = `rgba(0, 240, 255, ${a})`;
+        const [x0, y0] = project(-1, -1, z);
+        const [x1, y1] = project(1, 1, z);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      }
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.12)';
+      for (let i = 0; i <= 8; i++) {
+        const u = -1 + (i / 8) * 2;
+        for (const [ax, ay] of [[u, -1], [u, 1], [-1, u], [1, u]]) {
+          const [x0, y0] = project(ax, ay, 0);
+          const [x1, y1] = project(ax, ay, 1);
           ctx.beginPath();
-          ctx.arc(x, y, 2.0 + wave * 2.5, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          ctx.stroke();
         }
+      }
+      // A few floating motes at different depths
+      for (let i = 0; i < 18; i++) {
+        const z = ((i * 0.137 + t * 0.03) % 1);
+        const x = Math.sin(i * 12.9898) * 0.7;
+        const y = Math.cos(i * 78.233) * 0.6;
+        const [px, py] = project(x, y, z);
+        const r = 2.5 / (1 + z * 2.2);
+        ctx.fillStyle = i % 3 === 0 ? 'rgba(255, 0, 127, 0.55)' : 'rgba(0, 240, 255, 0.55)';
+        ctx.beginPath();
+        ctx.arc(px, py, r * 1.6, 0, Math.PI * 2);
+        ctx.fill();
       }
     };
     requestAnimationFrame(draw);
   }
 
-  getMouseEye(screenW, screenH) {
-    return {
-      x: this.mouseNormalized.x * (screenW * 0.5),
-      y: -this.mouseNormalized.y * (screenH * 0.5),
-      z: 55.0
-    };
+  // ---------------------------------------------------------------------- HUD
+
+  _bindHud() {
+    $('scene-select')?.addEventListener('change', (e) => {
+      this.cb.onSceneSelect?.(e.target.value);
+      e.target.blur(); // keep arrow keys for scene navigation
+    });
+    $('fullscreen-btn')?.addEventListener('click', () => this.toggleFullscreen());
+    $('settings-toggle-btn')?.addEventListener('click', () => this.toggleSettingsPanel());
+    $('settings-close-btn')?.addEventListener('click', () => this.toggleSettingsPanel(false));
+    $('help-btn')?.addEventListener('click', () => this.toggleHelp());
   }
 
   updateSceneUI(sceneDef) {
-    if (this.sceneSelect) {
-      this.sceneSelect.value = sceneDef.id;
-    }
-    const titleEl = document.getElementById('hud-scene-title');
-    if (titleEl) {
-      titleEl.textContent = sceneDef.name;
-    }
+    const sel = $('scene-select');
+    if (sel) sel.value = sceneDef.id;
+    const title = $('hud-scene-title');
+    if (title) title.textContent = sceneDef.name;
+    const tag = $('hud-scene-tagline');
+    if (tag) tag.textContent = sceneDef.tagline || '';
+    this.showSceneCard(sceneDef);
+  }
+
+  showSceneCard(sceneDef) {
+    const card = $('scene-card');
+    if (!card) return;
+    card.querySelector('.scene-card-title').textContent = sceneDef.name;
+    card.querySelector('.scene-card-tagline').textContent = sceneDef.hint || sceneDef.tagline || '';
+    card.classList.remove('show');
+    void card.offsetWidth; // restart the animation
+    card.classList.add('show');
   }
 
   showLoadingProgress(sceneName, percent) {
-    if (!this.loadingBar) return;
-    if (percent < 100) {
-      this.loadingBar.style.display = 'block';
-      this.loadingBar.style.width = `${percent}%`;
-      if (this.loadingLabel) {
-        this.loadingLabel.textContent = `Loading ${sceneName}... ${percent}%`;
-        this.loadingLabel.style.display = 'block';
+    const bar = $('scene-loading-bar');
+    const label = $('scene-loading-label');
+    if (!bar) return;
+    if (sceneName && percent < 100) {
+      bar.style.display = 'block';
+      bar.style.width = `${Math.max(percent, 3)}%`;
+      if (label) {
+        label.textContent = `Loading ${sceneName}… ${Math.round(percent)}%`;
+        label.style.display = 'block';
       }
     } else {
-      this.loadingBar.style.width = '100%';
+      bar.style.width = '100%';
       setTimeout(() => {
-        this.loadingBar.style.display = 'none';
-        if (this.loadingLabel) this.loadingLabel.style.display = 'none';
-      }, 300);
+        bar.style.display = 'none';
+        bar.style.width = '0%';
+        if (label) label.style.display = 'none';
+      }, 250);
     }
   }
 
-  toggleSettingsPanel() {
-    if (!this.settingsPanel) return;
-    const isHidden = this.settingsPanel.classList.toggle('hidden');
-    if (this.settingsToggleBtn) {
-      this.settingsToggleBtn.setAttribute('aria-expanded', (!isHidden).toString());
-    }
+  setTrackingState(state) {
+    // state: 'ok' | 'searching' | 'off'
+    const pill = $('tracking-pill');
+    if (!pill) return;
+    pill.dataset.state = state;
+  }
+
+  toggleSettingsPanel(force) {
+    const panel = $('settings-panel');
+    if (!panel) return;
+    const open = force ?? panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', !open);
+    $('settings-toggle-btn')?.setAttribute('aria-expanded', String(open));
+    document.body.classList.toggle('panel-open', open);
+    this.poke();
+  }
+
+  toggleHelp(force) {
+    const el = $('help-modal');
+    if (!el) return;
+    const open = force ?? el.classList.contains('hidden');
+    el.classList.toggle('hidden', !open);
+    this.poke();
   }
 
   toggleFullscreen() {
     if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(err => {
-        console.warn('Error attempting fullscreen:', err.message);
-      });
+      document.documentElement.requestFullscreen?.().catch((err) => this.toast(`Fullscreen unavailable: ${err.message}`));
     } else {
-      if (document.exitFullscreen) document.exitFullscreen();
+      document.exitFullscreen?.();
     }
   }
 
-  hideStartScreen() {
-    if (this.startScreen) {
-      this.startScreen.classList.add('fade-out');
-      setTimeout(() => {
-        this.startScreen.style.display = 'none';
-      }, 400);
+  toast(msg, ms = 1800, isError = false) {
+    const el = $('toast');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle('error', isError);
+    el.classList.add('show');
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => el.classList.remove('show'), ms);
+  }
+
+  // ---------------------------------------------------- auto-hide for immersion
+
+  poke() {
+    this._lastActivity = performance.now();
+    if (this._hudHidden) {
+      this._hudHidden = false;
+      document.body.classList.remove('idle');
     }
   }
 
-  showLoading(loading) {
-    if (this.spinner) this.spinner.style.display = loading ? 'block' : 'none';
-    if (this.startBtn) this.startBtn.disabled = loading;
+  _bindIdle() {
+    for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
+      window.addEventListener(ev, () => this.poke(), { passive: true });
+    }
+    setInterval(() => {
+      const running = document.body.classList.contains('running');
+      const panelOpen = document.body.classList.contains('panel-open');
+      const modalOpen = document.querySelector('.modal:not(.hidden)');
+      const hovering = document.querySelector('.hud:hover');
+      if (!running || panelOpen || modalOpen || hovering) return;
+      if (!this._hudHidden && performance.now() - this._lastActivity > IDLE_HIDE_MS) {
+        this._hudHidden = true;
+        document.body.classList.add('idle');
+      }
+    }, 250);
   }
 
-  showError(msg) {
-    this.showLoading(false);
-    if (this.errorMessage) {
-      this.errorMessage.textContent = msg;
-      this.errorMessage.style.display = 'block';
-    }
-    if (this.mouseModeBtn) {
-      this.mouseModeBtn.classList.add('highlight-action');
-    }
-  }
+  // ------------------------------------------------------------ overlays
 
-  clearError() {
-    if (this.errorMessage) {
-      this.errorMessage.style.display = 'none';
-      this.errorMessage.textContent = '';
+  _bindOverlays() {
+    $('credits-btn')?.addEventListener('click', () => $('credits-modal')?.classList.remove('hidden'));
+    for (const modal of document.querySelectorAll('.modal')) {
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal || e.target.closest('[data-close]')) modal.classList.add('hidden');
+      });
     }
   }
 
-  updateDebug(metrics) {
-    if (!this.settings.showDebug || !this.debugOverlay || !this.debugCtx) return;
+  // ------------------------------------------------------ card calibration
 
-    const { video, irisPoints, trackerFps, renderFps, eye, faceFound, activeTier } = metrics;
+  _bindCalibration() {
+    const slider = $('card-size');
+    const card = $('calib-card');
+    if (!slider || !card) return;
+
+    const apply = () => {
+      const wPx = parseFloat(slider.value);
+      card.style.width = `${wPx}px`;
+      card.style.height = `${wPx / CARD_ASPECT}px`;
+      const cmPerPx = CARD_WIDTH_CM / wPx;
+      const diag = this.cb.diagonalForCmPerPx ? this.cb.diagonalForCmPerPx(cmPerPx) : 0;
+      const out = $('card-diagonal');
+      if (out) out.textContent = diag ? `${diag.toFixed(1)}"` : '';
+      this._calibDiagonal = diag;
+    };
+    slider.addEventListener('input', apply);
+
+    // Drag the card's corner handle to resize, for people who'd rather not use the slider.
+    const handle = $('calib-handle');
+    let dragging = false;
+    let startX = 0;
+    let startW = 0;
+    handle?.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      startX = e.clientX;
+      startW = parseFloat(slider.value);
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle?.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const w = Math.min(parseFloat(slider.max), Math.max(parseFloat(slider.min), startW + (e.clientX - startX) * 2));
+      slider.value = String(w);
+      apply();
+    });
+    handle?.addEventListener('pointerup', () => { dragging = false; });
+
+    $('calib-apply')?.addEventListener('click', () => {
+      if (this._calibDiagonal > 5 && this._calibDiagonal < 120) {
+        const d = Math.round(this._calibDiagonal * 10) / 10;
+        this.patchSettings({ screenDiagonalInches: d });
+        this.toast(`Screen set to ${d}"`);
+      }
+      $('calib-modal')?.classList.add('hidden');
+    });
+
+    this._applyCalibration = apply;
+  }
+
+  openCalibration() {
+    const slider = $('card-size');
+    if (slider && this.cb.cmPerPxForDiagonal) {
+      // Start the card at the size implied by the current diagonal.
+      const cmPerPx = this.cb.cmPerPxForDiagonal(this.settings.screenDiagonalInches);
+      slider.value = String(Math.round(CARD_WIDTH_CM / cmPerPx));
+    }
+    this._applyCalibration?.();
+    $('calib-modal')?.classList.remove('hidden');
+  }
+
+  // ------------------------------------------------------------- keyboard
+
+  _bindKeyboard() {
+    window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = e.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable) {
+        if (e.key === 'Escape') e.target.blur();
+        return;
+      }
+      const running = document.body.classList.contains('running');
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+      switch (k) {
+        case 'f': this.toggleFullscreen(); break;
+        case 'h': case 's': this.toggleSettingsPanel(); break;
+        case '?': case '/': this.toggleHelp(); break;
+        case 'd': this.patchSettings({ showDebug: !this.settings.showDebug }, { notify: false }); this._applyDebugVisibility(); break;
+        case 'Escape':
+          for (const m of document.querySelectorAll('.modal')) m.classList.add('hidden');
+          this.toggleSettingsPanel(false);
+          break;
+        default:
+          if (!running) return;
+          if (k >= '0' && k <= '3') this.cb.onSceneSelect?.(Number(k));
+          else if (k === 'ArrowRight') this.cb.onSceneStep?.(1);
+          else if (k === 'ArrowLeft') this.cb.onSceneStep?.(-1);
+          else if (k === 'r' || k === 'c') this.cb.onRecenter?.();
+          else if (k === 'p' || k === 'g') this.cb.onGalleryToggle?.();
+          else if (k === 'm') this.cb.onInputModeChange?.(this.inputMode === 'mouse' ? 'camera' : 'mouse');
+          else return;
+      }
+      e.preventDefault();
+    });
+  }
+
+  // ---------------------------------------------------------- mouse / touch
+
+  _bindPointer() {
+    const setFrom = (e) => {
+      this.pointer.x = Math.max(-1, Math.min(1, (e.clientX / window.innerWidth) * 2 - 1));
+      this.pointer.y = Math.max(-1, Math.min(1, (e.clientY / window.innerHeight) * 2 - 1));
+      this.pointer.inside = true;
+    };
+    window.addEventListener('pointermove', setFrom, { passive: true });
+    window.addEventListener('pointerdown', setFrom, { passive: true });
+    document.documentElement.addEventListener('pointerleave', () => { this.pointer.inside = false; });
+    window.addEventListener('blur', () => { this.pointer.inside = false; });
+
+    // Wheel = lean in / out in mouse mode.
+    window.addEventListener('wheel', (e) => {
+      if (this.inputMode !== 'mouse' || e.target.closest?.('.hud, .modal')) return;
+      this.mouseDepth = Math.min(110, Math.max(25, this.mouseDepth * Math.exp(e.deltaY * 0.0012)));
+    }, { passive: true });
+  }
+
+  /** Eye position (cm, viewport-relative) implied by the pointer. */
+  getMouseEye(W, H, out) {
+    const p = this.pointer.inside ? this.pointer : { x: 0, y: 0 };
+    // Scale so that the pointer at the edge of the screen corresponds to the
+    // head being somewhat past the edge, which feels like natural leaning.
+    out.x = p.x * W * 0.6;
+    out.y = -p.y * H * 0.6;
+    out.z = this.mouseDepth;
+    return out;
+  }
+
+  // --------------------------------------------------------------- debug HUD
+
+  _applyDebugVisibility() {
+    const el = $('debug-overlay');
+    if (el) el.classList.toggle('hidden', !this.settings.showDebug);
+  }
+
+  updateDebug(m) {
+    if (!this.settings.showDebug || !this.debugCtx) return;
+    const ctx = this.debugCtx;
     const w = this.debugCanvas.width;
     const h = this.debugCanvas.height;
 
-    this.debugCtx.clearRect(0, 0, w, h);
-
-    if (video && video.readyState >= 2) {
-      this.debugCtx.save();
-      this.debugCtx.translate(w, 0);
-      this.debugCtx.scale(-1, 1);
-      this.debugCtx.drawImage(video, 0, 0, w, h);
-      this.debugCtx.restore();
-
-      this.debugCtx.fillStyle = 'rgba(5, 10, 25, 0.25)';
-      this.debugCtx.fillRect(0, 0, w, h);
-
-      if (irisPoints && irisPoints.length >= 2) {
-        const vw = video.videoWidth || 640;
-        const vh = video.videoHeight || 480;
-
-        irisPoints.forEach((pt, idx) => {
-          const cx = w - (pt.x / vw) * w;
-          const cy = (pt.y / vh) * h;
-
-          this.debugCtx.beginPath();
-          this.debugCtx.arc(cx, cy, 3.5, 0, Math.PI * 2);
-          this.debugCtx.fillStyle = idx === 0 ? '#00f5ff' : '#ff007f';
-          this.debugCtx.shadowColor = idx === 0 ? '#00f5ff' : '#ff007f';
-          this.debugCtx.shadowBlur = 6;
-          this.debugCtx.fill();
+    if (m.video && m.video.readyState >= 2) {
+      ctx.save();
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(m.video, 0, 0, w, h);
+      ctx.restore();
+      ctx.fillStyle = 'rgba(5, 10, 25, 0.3)';
+      ctx.fillRect(0, 0, w, h);
+      if (m.irisPoints) {
+        const vw = m.video.videoWidth || 640;
+        const vh = m.video.videoHeight || 480;
+        m.irisPoints.forEach((pt, i) => {
+          ctx.beginPath();
+          ctx.arc(w - (pt.x / vw) * w, (pt.y / vh) * h, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = i === 0 ? '#00f5ff' : '#ff007f';
+          ctx.fill();
         });
       }
     } else {
-      this.debugCtx.fillStyle = '#0a0f24';
-      this.debugCtx.fillRect(0, 0, w, h);
-      this.debugCtx.fillStyle = '#6e7a9e';
-      this.debugCtx.font = '11px sans-serif';
-      this.debugCtx.textAlign = 'center';
-      this.debugCtx.fillText(
-        this.isMouseFallbackActive ? 'Mouse Mode' : 'Camera Standby',
-        w / 2,
-        h / 2
-      );
+      ctx.fillStyle = '#0a0f24';
+      ctx.fillRect(0, 0, w, h);
+      // Top-down view of where the "eye" is relative to the screen.
+      const sx = w / 2;
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx - 40, 14);
+      ctx.lineTo(sx + 40, 14);
+      ctx.stroke();
+      const ex = sx + (m.eye.x / Math.max(m.screenW, 1)) * 80;
+      const ey = 14 + (m.eye.z / 120) * (h - 24);
+      ctx.fillStyle = '#ff007f';
+      ctx.beginPath();
+      ctx.arc(ex, ey, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#6e7a9e';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(m.mode === 'mouse' ? 'mouse · wheel = depth' : 'camera starting…', sx, h - 6);
     }
 
-    const fpsEl = document.getElementById('debug-render-fps');
-    if (fpsEl) fpsEl.textContent = renderFps;
-
-    const trkFpsEl = document.getElementById('debug-tracker-fps');
-    if (trkFpsEl) trkFpsEl.textContent = trackerFps;
-
-    const tierEl = document.getElementById('debug-quality-tier');
-    if (tierEl) tierEl.textContent = activeTier || this.settings.qualityTier;
-
-    const eyeEl = document.getElementById('debug-eye-pos');
-    if (eyeEl) {
-      eyeEl.textContent = `X: ${eye.x >= 0 ? '+' : ''}${eye.x.toFixed(1)}  Y: ${eye.y >= 0 ? '+' : ''}${eye.y.toFixed(1)}  Z: ${eye.z.toFixed(1)} cm`;
-    }
-
-    const faceEl = document.getElementById('debug-face-status');
-    if (faceEl) {
-      if (this.isMouseFallbackActive) {
-        faceEl.textContent = 'MOUSE FALLBACK';
-        faceEl.className = 'status-tag tag-mouse';
-      } else if (faceFound) {
-        faceEl.textContent = 'TRACKED';
-        faceEl.className = 'status-tag tag-green';
+    // DOM text only 5x a second; it's surprisingly expensive at 60+ Hz.
+    if (++this._debugTick % 12 !== 0) return;
+    const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+    set('debug-render-fps', m.renderFps);
+    set('debug-tracker-fps', m.mode === 'camera' ? `${m.trackerFps} (${m.inferenceMs.toFixed(1)} ms ${m.delegate || ''})` : '—');
+    set('debug-quality-tier', m.qualitySetting === 'Auto' ? `Auto → ${m.activeTier}` : m.activeTier);
+    const f = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}`;
+    set('debug-eye-pos', `${f(m.eye.x)}, ${f(m.eye.y)}, ${m.eye.z.toFixed(1)} cm`);
+    set('debug-window', `${m.screenW.toFixed(1)} × ${m.screenH.toFixed(1)} cm${m.offset ? ` @ ${f(m.offset.x)}, ${f(m.offset.y)}` : ''}`);
+    const status = $('debug-face-status');
+    if (status) {
+      if (m.mode === 'mouse') {
+        status.textContent = 'MOUSE';
+        status.className = 'status-tag tag-mouse';
+      } else if (m.faceFound) {
+        status.textContent = 'TRACKED';
+        status.className = 'status-tag tag-green';
       } else {
-        faceEl.textContent = 'NO FACE DETECTED';
-        faceEl.className = 'status-tag tag-red';
+        status.textContent = 'NO FACE';
+        status.className = 'status-tag tag-red';
       }
     }
   }

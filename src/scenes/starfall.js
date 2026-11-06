@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
 import { simplexNoise3DGLSL } from '../shaders/simplexNoise.js';
 import { edgeFadeVertexGLSL } from '../shaders/edgeFade.js';
+import { disposeObject } from '../core/dispose.js';
 
 // Starfall GPGPU velocity shader with inline 3D curl noise and winding celestial path
 const starfallVelocityShader = /* glsl */ `
@@ -33,13 +34,17 @@ void main() {
   riverCenter.y += cos(pos.z * 0.05 + time * 0.26) * 2.2;
 
   vec2 toCenter = riverCenter - pos.xy;
-  // Swirling vortex along the river
-  vel.x += toCenter.x * 2.2 - toCenter.y * 0.8;
-  vel.y += toCenter.y * 2.2 + toCenter.x * 0.8;
+  float r = length(toCenter);
+  float riverRadius = 3.2 + 1.6 * sin(pos.z * 0.09 + time * 0.2);
+  // Gentle swirl around the centreline, firm pull only outside the banks.
+  vec2 swirl = vec2(-toCenter.y, toCenter.x) * 0.55;
+  vec2 confine = toCenter * smoothstep(riverRadius, riverRadius * 1.8, r) * 2.4;
+  vel.xy += swirl + confine;
 
-  // Curl noise turbulent field
-  vec3 curl = curlNoise(pos * 0.05 + vec3(0.0, 0.0, time * 0.03), 0.1);
-  vel += curl * 5.2;
+  // Curl noise turbulence: two octaves, so the river has eddies at two scales.
+  vec3 curl = curlNoise(pos * 0.06 + vec3(0.0, 0.0, time * 0.04), 0.1) * 4.5
+            + curlNoise(pos * 0.19 - vec3(time * 0.05), 0.1) * 2.2;
+  vel += curl;
 
   // Curiosity attractor toward user gaze near z = -20
   if (curiosityWeight > 0.01 && abs(pos.z - (-20.0)) < 16.0) {
@@ -71,7 +76,8 @@ void main() {
 
   // Respawn condition: age > life or z > +10.0
   if (age > life || pos.z > 10.0) {
-    float r = hash(uv + vec2(time, 1.2)) * 6.5;
+    // sqrt for a uniform disc; a linear radius piles particles onto the axis.
+    float r = sqrt(hash(uv + vec2(time, 1.2))) * 6.5;
     float theta = hash(uv + vec2(time, 3.4)) * 6.28318;
     pos.x = -12.0 + cos(theta) * r;
     pos.y = -3.5  + sin(theta) * r;
@@ -85,10 +91,27 @@ void main() {
 }
 `;
 
+function makeGlowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.2, 'rgba(200,240,255,0.6)');
+  grad.addColorStop(0.5, 'rgba(80,180,255,0.15)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 export default {
   id: 'starfall',
   name: 'Starfall',
-  tagline: 'River of light flowing past a ringed gas giant and fly-by comet',
+  tagline: 'A river of light, a ringed giant, and the occasional comet',
+  hint: 'Watch for the comet. It comes out through the glass.',
   quality: { minTier: 'Low' },
 
   async create(ctx) {
@@ -148,10 +171,10 @@ export default {
 
     // 2. Gas Giant Planet at (+11.5, +3.8, -52 cm) with Rings and Cast Shadow
     const planetGroup = new T.Group();
-    const planetPos = new T.Vector3(11.5, 3.8, -52.0);
+    const planetPos = new T.Vector3(16.0, 5.0, -95.0);
     planetGroup.position.copy(planetPos);
 
-    const planetRadius = 13.0;
+    const planetRadius = 15.0;
     const planetGeo = new T.SphereGeometry(planetRadius, 48, 32);
 
     const sunDir = new T.Vector3(0.65, 0.45, 0.62).normalize();
@@ -207,8 +230,8 @@ export default {
     planetGroup.add(planetMesh);
 
     // Tilted Ring with real planetary cast shadow
-    const ringInnerR = 17.0;
-    const ringOuterR = 29.5;
+    const ringInnerR = 19.5;
+    const ringOuterR = 34.0;
     const ringGeo = new T.RingGeometry(ringInnerR, ringOuterR, 64);
     ringGeo.rotateX(Math.PI * 0.5);
 
@@ -244,8 +267,9 @@ export default {
         void main() {
           float r = length(vLocalPos.xz);
           float t = (r - innerRadius) / (outerRadius - innerRadius);
-          float band = sin(t * 36.0) * 0.5 + 0.5;
-          float alpha = smoothstep(0.0, 0.08, t) * smoothstep(1.0, 0.90, t) * (0.35 + band * 0.45);
+          float band = (sin(t * 52.0) * 0.5 + 0.5) * 0.6 + (sin(t * 131.0 + 1.7) * 0.5 + 0.5) * 0.4;
+          float gap = 1.0 - (1.0 - smoothstep(0.0, 0.025, abs(t - 0.62))) * 0.92;
+          float alpha = smoothstep(0.0, 0.08, t) * smoothstep(1.0, 0.90, t) * (0.12 + band * 0.42) * gap;
           vec3 ringCol = mix(vec3(0.58, 0.50, 0.72), vec3(0.85, 0.72, 0.48), band);
 
           // Planetary cast shadow: point on ring relative to planet center
@@ -272,11 +296,16 @@ export default {
     ringMesh.rotation.x = 0.28;
     planetGroup.add(ringMesh);
 
+    // Sunlight for the (PBR) moons. Shader materials above do their own lighting.
+    const sunLight = new T.DirectionalLight(0xfff1dd, 2.4);
+    sunLight.position.copy(sunDir).multiplyScalar(100);
+    root.add(sunLight, new T.AmbientLight(0x404a80, 0.25));
+
     // 3 Moons
     const moons = [];
     const moonColors = [0x8899bb, 0xcca899, 0x77bbaa];
     const moonSizes = [1.6, 2.2, 1.3];
-    const moonRadii = [34.0, 44.0, 56.0];
+    const moonRadii = [40.0, 48.0, 58.0]; // stays well behind the glass
     const moonSpeeds = [0.32, 0.20, 0.12];
 
     for (let m = 0; m < 3; m++) {
@@ -408,13 +437,18 @@ export default {
           vec4 clip = projectionMatrix * mvPos;
           gl_Position = clip;
 
-          float sizeCm = 0.12;
+          float sizeCm = 0.14;
           float dist = max(-mvPos.z, 1.0);
-          gl_PointSize = sizeCm * pxPerCm * eyeZ / dist;
+          float size = sizeCm * pxPerCm * eyeZ / dist;
+          // Sub-pixel points flicker and vanish. Keep a minimum size and dim
+          // the point instead, so each particle contributes the same light.
+          float minSize = 2.5;
+          gl_PointSize = max(size, minSize);
+          float energy = size < minSize ? (size * size) / (minSize * minSize) : 1.0;
 
           float depthFade = smoothstep(-68.0, -56.0, pos.z) * smoothstep(9.0, 2.0, pos.z);
           float edgeFade = computeEdgeFade(clip, pos.z);
-          vAlpha = depthFade * edgeFade * 0.24;
+          vAlpha = depthFade * edgeFade * 0.34 * max(energy, 0.35);
         }
       `,
       fragmentShader: /* glsl */ `
@@ -423,7 +457,7 @@ export default {
         void main() {
           float d = length(gl_PointCoord - vec2(0.5));
           if (d > 0.5) discard;
-          float core = pow(1.0 - d * 2.0, 2.2);
+          float core = pow(1.0 - d * 2.0, 1.4);
           gl_FragColor = vec4(vColor, vAlpha * core);
         }
       `
@@ -438,15 +472,30 @@ export default {
     let cometProgress = 0.0;
     let cometCooldown = 4.0;
     const cometHead = new T.Mesh(
-      new T.SphereGeometry(0.85, 16, 16),
-      new T.MeshBasicMaterial({ color: 0xe0f7ff })
+      new T.SphereGeometry(0.55, 16, 16),
+      new T.MeshBasicMaterial({ color: 0xf2fbff })
     );
+    cometHead.position.set(0, -999, 0);
+    const cometGlow = new T.Sprite(new T.SpriteMaterial({
+      map: makeGlowTexture(),
+      color: 0x9fe8ff,
+      transparent: true,
+      blending: T.AdditiveBlending,
+      depthWrite: false
+    }));
+    cometGlow.scale.setScalar(5.0);
+    cometHead.add(cometGlow);
     root.add(cometHead);
+    const cometP0 = new T.Vector3(-30, 9, -120);
+    const cometP1 = new T.Vector3(0, 2, 132);
+    const cometP2 = new T.Vector3(30, -8, -120);
+    const cometCurve = new T.QuadraticBezierCurve3(cometP0, cometP1, cometP2);
+    const cometPoint = new T.Vector3();
     stage.registerPopOut(cometHead);
 
-    const cometTailCount = 450;
+    const cometTailCount = 900;
     const tailPos = new Float32Array(cometTailCount * 3);
-    const tailAges = new Float32Array(cometTailCount);
+    const tailAges = new Float32Array(cometTailCount).fill(1.0);
     let tailHead = 0;
 
     const tailGeo = new T.BufferGeometry();
@@ -577,6 +626,7 @@ export default {
         velUniforms.time.value = t;
         velUniforms.delta.value = Math.min(dt, 0.033);
         velUniforms.curiosityPos.value.set(eye.x * 0.45, eye.y * 0.45);
+        velUniforms.curiosityWeight.value = ctx.settings?.curiosity ?? 0.3;
 
         posUniforms.time.value = t;
         posUniforms.delta.value = Math.min(dt, 0.033);
@@ -603,27 +653,31 @@ export default {
         }
 
         if (cometActive) {
-          cometProgress += dt * 0.22;
+          cometProgress += dt * 0.2;
           if (cometProgress >= 1.0) {
             cometActive = false;
             cometCooldown = 7.0 + Math.random() * 5.0;
             cometHead.position.set(0, -999, 0);
           } else {
-            const cp = cometProgress;
-            // Arc path: starts at upper-left far, flies diagonally across foreground
-            const cx = -18.0 + cp * 36.0;
-            const cy = 8.0 - cp * 12.0;
-            const cz = -60.0 + cp * 66.0;
+            cometCurve.getPoint(cometProgress, cometPoint);
+            const cx = cometPoint.x;
+            const cy = cometPoint.y;
+            const cz = cometPoint.z;
 
             cometHead.position.set(cx, cy, cz);
 
             // Record tail points
             const tOffset = tailHead * 3;
-            tailPos[tOffset + 0] = cx + (Math.random() - 0.5) * 0.3;
-            tailPos[tOffset + 1] = cy + (Math.random() - 0.5) * 0.3;
-            tailPos[tOffset + 2] = cz + (Math.random() - 0.5) * 0.3;
-            tailAges[tailHead] = 0.0;
-            tailHead = (tailHead + 1) % cometTailCount;
+            // A few particles per frame so the tail is continuous at any frame rate.
+            const n = Math.max(1, Math.round(dt * 120));
+            for (let k = 0; k < n; k++) {
+              const o = tailHead * 3;
+              tailPos[o + 0] = cx + (Math.random() - 0.5) * 0.5;
+              tailPos[o + 1] = cy + (Math.random() - 0.5) * 0.5;
+              tailPos[o + 2] = cz + (Math.random() - 0.5) * 0.5;
+              tailAges[tailHead] = k / n * 0.05;
+              tailHead = (tailHead + 1) % cometTailCount;
+            }
           }
         }
 
@@ -666,16 +720,7 @@ export default {
         moteGeo.dispose();
         moteMat.dispose();
 
-        root.traverse((obj) => {
-          if (obj.isMesh || obj.isPoints) {
-            if (obj.geometry) obj.geometry.dispose();
-            if (obj.material) {
-              if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-              else obj.material.dispose();
-            }
-          }
-        });
-        root.clear();
+        disposeObject(root);
       }
     };
   }

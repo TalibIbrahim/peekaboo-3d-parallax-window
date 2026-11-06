@@ -1,52 +1,83 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-function createGridTexture() {
-  const size = 512;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
+/**
+ * World-space grid: a line every 5 cm and a bright one every 25 cm, on every
+ * wall, regardless of how big the room (= your screen) is. Anti-aliased with
+ * screen-space derivatives so it stays crisp at grazing angles.
+ */
+function createGridMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      baseColor: { value: new THREE.Color(0x060a1d) },
+      minorColor: { value: new THREE.Color(0x0a5f78) },
+      majorColor: { value: new THREE.Color(0x00f0ff) }
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vWorld;
+      varying vec3 vNormal;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorld = wp.xyz;
+        vNormal = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 baseColor;
+      uniform vec3 minorColor;
+      uniform vec3 majorColor;
+      varying vec3 vWorld;
+      varying vec3 vNormal;
 
-  ctx.fillStyle = '#060a1d';
-  ctx.fillRect(0, 0, size, size);
+      float grid(vec2 p, float spacing, float widthPx) {
+        vec2 d = abs(p - spacing * floor(p / spacing + 0.5));
+        vec2 fw = max(fwidth(p), vec2(1e-4));
+        vec2 line = 1.0 - smoothstep(vec2(0.0), fw * widthPx, d);
+        return max(line.x, line.y);
+      }
 
-  const pxPerCm = size / 50.0;
+      void main() {
+        vec3 n = abs(vNormal);
+        vec2 p = n.y > 0.5 ? vWorld.xz : (n.x > 0.5 ? vWorld.zy : vWorld.xy);
+        float minor = grid(p, 5.0, 1.2);
+        float major = grid(p, 25.0, 2.0);
+        // Depth cue: walls darken with distance into the room.
+        float depth = clamp(-vWorld.z / 70.0, 0.0, 1.0);
+        vec3 col = baseColor * (1.0 - depth * 0.5);
+        col = mix(col, minorColor * (1.0 - depth * 0.6), minor * 0.8);
+        col = mix(col, majorColor * (1.2 - depth * 0.7), major);
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `
+  });
+}
 
-  // Minor grid lines every 5 cm
-  ctx.strokeStyle = 'rgba(0, 220, 255, 0.16)';
-  ctx.lineWidth = 1.5;
-  for (let cm = 0; cm <= 50; cm += 5) {
-    if (cm % 25 === 0) continue;
-    const pos = Math.round(cm * pxPerCm);
-    ctx.beginPath();
-    ctx.moveTo(pos, 0); ctx.lineTo(pos, size);
-    ctx.moveTo(0, pos); ctx.lineTo(size, pos);
-    ctx.stroke();
-  }
-
-  // Major grid lines every 25 cm with bright cyan neon glow
-  ctx.strokeStyle = '#00f0ff';
-  ctx.lineWidth = 2.5;
-  ctx.shadowColor = '#00e5ff';
-  ctx.shadowBlur = 6;
-  for (let cm = 0; cm <= 50; cm += 25) {
-    const pos = Math.round(cm * pxPerCm);
-    ctx.beginPath();
-    ctx.moveTo(pos, 0); ctx.lineTo(pos, size);
-    ctx.moveTo(0, pos); ctx.lineTo(size, pos);
-    ctx.stroke();
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  return texture;
+function makeLabel(text) {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 96;
+  const g = c.getContext('2d');
+  g.font = '600 56px ui-monospace, Consolas, monospace';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = '#7df9ff';
+  g.fillText(text, 128, 50);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(4.8, 1.8),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, fog: false })
+  );
+  return mesh;
 }
 
 export default {
   id: 'calibration',
   name: 'Calibration',
-  tagline: 'Physical metric room with neon grid and depth anchors',
+  tagline: 'A box exactly the size of your screen, ruled every 5 cm',
+  hint: 'Grid squares should look square from wherever you sit. If not, check screen size in Settings.',
   quality: { minTier: 'Low' },
 
   async create(ctx) {
@@ -55,12 +86,21 @@ export default {
     root.name = 'CalibrationSceneRoot';
 
     const roomDepth = 70.0;
-    const wallTexture = createGridTexture();
-    const wallMaterial = new THREE.MeshStandardMaterial({
-      map: wallTexture,
-      roughness: 0.6,
-      metalness: 0.2
-    });
+    const wallMaterial = createGridMaterial();
+
+    // Metals need something to reflect.
+    const pmrem = new THREE.PMREMGenerator(ctx.renderer);
+    const envTexture = pmrem.fromScene(new RoomEnvironment(ctx.renderer), 0.04).texture;
+    pmrem.dispose();
+
+    // Depth markers on the floor, every 10 cm into the room.
+    const labels = [];
+    for (let d = 10; d <= 60; d += 10) {
+      const label = makeLabel(`${d} cm`);
+      label.rotation.x = -Math.PI / 2;
+      root.add(label);
+      labels.push({ mesh: label, d });
+    }
 
     // 5 walls
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), wallMaterial);
@@ -228,6 +268,7 @@ export default {
       shadows.forEach(s => {
         s.shadow.position.y = -H * 0.5 + 0.08;
       });
+      for (const l of labels) l.mesh.position.set(-W * 0.5 + 3.2, -H * 0.5 + 0.05, -l.d);
 
       // Keep pop-outs inside safe rect
       p1.position.x = -stg.safeMaxX * 0.6;
@@ -237,10 +278,16 @@ export default {
 
     updateWalls(stage);
 
+    // Reflections for the metals, kept subtle so the neon still reads.
+    root.traverse((o) => {
+      if (o.material?.isMeshStandardMaterial) o.material.envMapIntensity = 0.3;
+    });
+
     return {
       root,
       background: new THREE.Color(0x050716),
       fog: new THREE.Fog(0x050716, 50, 160),
+      environment: envTexture,
       post: {
         bloomStrength: 0.65,
         bloomRadius: 0.5,
@@ -272,7 +319,7 @@ export default {
 
       dispose() {
         popOuts.forEach(p => stage.unregisterPopOut(p));
-        wallTexture.dispose();
+        envTexture.dispose();
         wallMaterial.dispose();
         heroGeo.dispose();
         heroMat.dispose();

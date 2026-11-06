@@ -3,6 +3,7 @@ import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer
 import { causticsGLSL } from '../shaders/caustics.js';
 import { simplexNoise3DGLSL } from '../shaders/simplexNoise.js';
 import { edgeFadeVertexGLSL } from '../shaders/edgeFade.js';
+import { disposeObject } from '../core/dispose.js';
 
 // GPGPU velocity simulation shader for circulating reef fish school
 const fragmentShaderVelocity = /* glsl */ `
@@ -15,6 +16,7 @@ uniform float sharkActive;
 uniform vec3 boundsMin;
 uniform vec3 boundsMax;
 uniform float speedLimit;
+uniform float predatorStrength;
 
 const float separationDist = 2.6;
 const float alignmentDist = 5.2;
@@ -30,10 +32,11 @@ void main() {
   vec3 cohesion = vec3(0.0);
   float neighborCount = 0.0;
 
-  for (float y = 0.0; y < 1.0; y += 0.1) {
-    for (float x = 0.0; x < 1.0; x += 0.1) {
-      vec2 otherUV = vec2(x, y);
-      if (otherUV == uv) continue;
+  // Visit every other fish (resolution is a compile-time constant).
+  for (float y = 0.5; y < resolution.y; y += 1.0) {
+    for (float x = 0.5; x < resolution.x; x += 1.0) {
+      vec2 otherUV = vec2(x, y) / resolution.xy;
+      if (all(lessThan(abs(otherUV - uv), 0.25 / resolution.xy))) continue;
 
       vec3 otherPos = texture2D(texturePosition, otherUV).xyz;
       vec3 otherVel = texture2D(textureVelocity, otherUV).xyz;
@@ -78,27 +81,31 @@ void main() {
   if (selfPos.z < boundsMin.z) accel.z += ( boundsMin.z - selfPos.z ) * 4.5;
   if (selfPos.z > boundsMax.z) accel.z += ( boundsMax.z - selfPos.z ) * 7.5;
 
-  // Face as predator (leaning toward screen gently scatters nearby fish)
-  vec3 toPred = selfPos - predator;
-  float predDist = length(toPred);
-  if (predDist < predatorRadius && predDist > 0.01) {
-    float fleeForce = (1.0 - predDist / predatorRadius) * 26.0;
-    accel += (toPred / predDist) * fleeForce;
+  // Face as predator: the viewer's face projected into the front of the
+  // tank, growing stronger as they lean toward the glass.
+  if (predatorStrength > 0.001) {
+    vec3 toPred = selfPos - predator;
+    float predDist = length(toPred);
+    if (predDist < predatorRadius && predDist > 0.01) {
+      float falloff = 1.0 - predDist / predatorRadius;
+      accel += (toPred / predDist) * falloff * falloff * 90.0 * predatorStrength;
+    }
   }
 
   // Shark shadow fleeing
   if (sharkActive > 0.5) {
     vec3 toShark = selfPos - sharkPos;
     float sDist = length(toShark);
-    if (sDist < 30.0 && sDist > 0.01) {
-      accel += (toShark / sDist) * 35.0;
+    if (sDist < 22.0 && sDist > 0.01) {
+      accel += (toShark / sDist) * (1.0 - sDist / 22.0) * 80.0;
     }
   }
 
   selfVel += accel * delta;
   float speed = length(selfVel);
-  if (speed > speedLimit) {
-    selfVel = (selfVel / speed) * speedLimit;
+  float limit = speedLimit * (1.0 + predatorStrength * 0.8 + sharkActive * 0.6);
+  if (speed > limit) {
+    selfVel = (selfVel / speed) * limit;
   } else if (speed < 5.0) {
     selfVel = (selfVel / (speed + 0.001)) * 5.0;
   }
@@ -262,10 +269,21 @@ function createOrganicFishGeometry() {
   return geo;
 }
 
+function mulberry32(seed) {
+  return () => {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 export default {
   id: 'abyss',
   name: 'Abyss',
-  tagline: 'Living bioluminescent reef cave with schooling fish and jellyfish',
+  tagline: 'A bioluminescent reef cave with a living school of fish',
+  hint: 'Lean in close to the glass and the fish will scatter.',
   quality: { minTier: 'Low' },
 
   async create(ctx) {
@@ -274,7 +292,7 @@ export default {
     root.name = 'AbyssRoot';
 
     const tier = quality || 'Medium';
-    const fishTexDim = (tier === 'Low') ? 14 : (tier === 'High') ? 22 : 18;
+    const fishTexDim = (tier === 'Low') ? 16 : (tier === 'High') ? 32 : 24; // 256 / 576 / 1024 fish
     const fishCount = fishTexDim * fishTexDim;
 
     // 1. Cave Frame: Craggy rock walls with procedural displacement & bioluminescent veins
@@ -658,7 +676,7 @@ export default {
         singleJellyGroup.scale.set(0.85, 0.85, 0.85);
         stage.registerPopOut(bMesh);
       } else {
-        const s = 0.55 + (i % 3) * 0.12;
+        const s = 0.38 + (i % 3) * 0.1;
         singleJellyGroup.scale.set(s, s, s);
       }
 
@@ -720,7 +738,8 @@ export default {
     velUniforms.time = { value: 0 };
     velUniforms.delta = { value: 0.016 };
     velUniforms.predator = { value: new T.Vector3(0, 0, 55) };
-    velUniforms.predatorRadius = { value: 26.0 };
+    velUniforms.predatorRadius = { value: 16.0 };
+    velUniforms.predatorStrength = { value: 0.0 };
     velUniforms.sharkPos = { value: new T.Vector3(0, 0, -45) };
     velUniforms.sharkActive = { value: 0.0 };
     velUniforms.boundsMin = { value: new T.Vector3(-stage.W * 0.45, -stage.H * 0.45, -58.0) };
@@ -793,15 +812,19 @@ export default {
         varying float vWorldZ;
 
         void main() {
+          // Double-sided: flip the normal on back faces, otherwise they get
+          // full rim lighting and every fish looks washed-out white.
+          vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+          vec3 v = normalize(vViewDir);
           vec3 lightDir = normalize(vec3(0.2, 0.9, 0.35));
-          float diff = max(dot(vNormal, lightDir), 0.0);
-          float amb = 0.28;
+          float diff = max(dot(n, lightDir), 0.0);
+          float amb = 0.32;
 
-          float fresnel = pow(1.0 - max(dot(vNormal, vViewDir), 0.0), 2.8);
-          vec3 sheen = vec3(0.2, 0.75, 1.0) * fresnel * 0.45;
+          float fresnel = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+          vec3 sheen = vec3(0.2, 0.75, 1.0) * fresnel * 0.22;
 
-          vec3 halfV = normalize(lightDir + vViewDir);
-          float spec = pow(max(dot(vNormal, halfV), 0.0), 24.0) * 0.35;
+          vec3 halfV = normalize(lightDir + v);
+          float spec = pow(max(dot(n, halfV), 0.0), 32.0) * 0.3;
 
           float depthFade = clamp((-vWorldZ - 18.0) / 42.0, 0.0, 0.75);
           vec3 deepSeaFog = vec3(0.01, 0.07, 0.12);
@@ -853,7 +876,8 @@ export default {
       uniforms: {
         time: { value: 0 },
         pxPerCm: { value: stage.pxPerCm },
-        eyeZ: { value: 55.0 }
+        eyeZ: { value: 55.0 },
+        boxH: { value: stage.H * 1.1 }
       },
       transparent: true,
       blending: T.AdditiveBlending,
@@ -862,13 +886,14 @@ export default {
         uniform float time;
         uniform float pxPerCm;
         uniform float eyeZ;
+        uniform float boxH;
         attribute float speed;
         varying float vAlpha;
         ${edgeFadeVertexGLSL}
 
         void main() {
           vec3 p = position;
-          p.y -= mod(time * speed, 60.0) - 30.0;
+          p.y = mod(p.y - time * speed + boxH * 0.5, boxH) - boxH * 0.5;
           p.x += sin(time * 0.5 + p.z * 0.1) * 0.4;
 
           vec4 mvPos = modelViewMatrix * vec4(p, 1.0);
@@ -898,9 +923,121 @@ export default {
     snowPoints.frustumCulled = false;
     root.add(snowPoints);
 
+    // 9. Kelp forest swaying along the back and side walls
+    const kelpGeo = new T.PlaneGeometry(1.1, 1, 1, 18);
+    kelpGeo.translate(0, 0.5, 0);
+    const kelpMat = new T.ShaderMaterial({
+      side: T.DoubleSide,
+      uniforms: { time: { value: 0 } },
+      vertexShader: /* glsl */ `
+        uniform float time;
+        varying float vH;
+        varying float vDepth;
+        varying float vEdge;
+        void main() {
+          vec3 p = position;
+          vH = uv.y;
+          vEdge = abs(uv.x - 0.5) * 2.0;
+          vec4 base = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          float phase = base.x * 0.31 + base.z * 0.17;
+          vec4 wp = modelMatrix * instanceMatrix * vec4(p, 1.0);
+          // Sway grows with height; two frequencies so it never looks like a metronome.
+          float h = uv.y;
+          wp.x += (sin(time * 0.8 + phase + h * 2.5) * 1.6 + sin(time * 1.7 + phase * 2.0) * 0.4) * h * h;
+          wp.z += cos(time * 0.6 + phase + h * 2.0) * 0.8 * h * h;
+          vDepth = -wp.z;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying float vH;
+        varying float vDepth;
+        varying float vEdge;
+        void main() {
+          vec3 col = mix(vec3(0.02, 0.10, 0.06), vec3(0.10, 0.34, 0.20), vH);
+          col += vec3(0.0, 0.25, 0.22) * pow(1.0 - vEdge, 3.0) * vH * 0.35; // midrib catches light
+          float fogAmt = clamp((vDepth - 15.0) / 55.0, 0.0, 0.85);
+          col = mix(col, vec3(0.005, 0.05, 0.08), fogAmt);
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `
+    });
+    const kelpCount = 36;
+    const kelp = new T.InstancedMesh(kelpGeo, kelpMat, kelpCount);
+    kelp.frustumCulled = false;
+    const placeKelp = (stg) => {
+      const m = new T.Matrix4();
+      const q = new T.Quaternion();
+      const rand = mulberry32(7);
+      for (let i = 0; i < kelpCount; i++) {
+        let x;
+        let z;
+        if (i < 16) { // back wall
+          x = (rand() - 0.5) * stg.W * 0.95;
+          z = -62 - rand() * 6;
+        } else { // side walls
+          const side = i % 2 ? 1 : -1;
+          x = side * (stg.W * 0.5 - 0.8 - rand() * 2.5);
+          z = -18 - rand() * 44;
+        }
+        const height = stg.H * (0.55 + rand() * 0.5);
+        q.setFromAxisAngle(new T.Vector3(0, 1, 0), rand() * Math.PI);
+        m.compose(new T.Vector3(x, -stg.H * 0.5, z), q, new T.Vector3(0.7 + rand() * 0.6, height, 1));
+        kelp.setMatrixAt(i, m);
+      }
+      kelp.instanceMatrix.needsUpdate = true;
+    };
+    placeKelp(stage);
+    root.add(kelp);
+
+    // 10. The shark: a dark silhouette that cruises past the back of the cave
+    const sharkShape = new T.Shape();
+    sharkShape.moveTo(9, 0);                       // snout
+    sharkShape.quadraticCurveTo(7, 1.6, 2, 1.7);
+    sharkShape.lineTo(0.6, 4.2);                   // dorsal fin
+    sharkShape.lineTo(-1.2, 1.5);
+    sharkShape.quadraticCurveTo(-5, 1.0, -7, 0.4);
+    sharkShape.lineTo(-10, 3.4);                   // upper caudal lobe
+    sharkShape.lineTo(-8.6, 0);
+    sharkShape.lineTo(-9.6, -2.4);                 // lower caudal lobe
+    sharkShape.lineTo(-7, -0.4);
+    sharkShape.quadraticCurveTo(-3, -1.2, 0.5, -1.5);
+    sharkShape.lineTo(-0.8, -3.0);                 // pectoral fin
+    sharkShape.lineTo(2.4, -1.5);
+    sharkShape.quadraticCurveTo(7, -1.3, 9, 0);
+    const sharkGeo = new T.ShapeGeometry(sharkShape, 12);
+    const sharkMat = new T.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: T.DoubleSide,
+      uniforms: { time: { value: 0 }, opacity: { value: 0 } },
+      vertexShader: /* glsl */ `
+        uniform float time;
+        void main() {
+          vec3 p = position;
+          // Tail sweeps side to side; amplitude grows toward the tail.
+          float tail = smoothstep(2.0, -10.0, p.x);
+          p.z += sin(time * 5.0 - p.x * 0.35) * tail * 1.6;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float opacity;
+        void main() {
+          gl_FragColor = vec4(0.004, 0.025, 0.04, opacity);
+        }
+      `
+    });
+    const shark = new T.Mesh(sharkGeo, sharkMat);
+    shark.visible = false;
+    root.add(shark);
+
+    let predatorStrength = 0;
     let sharkTimer = 0;
-    let sharkNextTime = 25.0;
-    let sharkDartRemaining = 0;
+    let sharkNextTime = 14.0;
+    let sharkPass = -1; // 0..1 while crossing, -1 when away
+    let sharkDir = 1;
+    const SHARK_PASS_S = 9.0;
 
     return {
       root,
@@ -912,7 +1049,7 @@ export default {
         bloomThreshold: 0.85
       },
 
-      update(dt, t, eye, stg) {
+      update(dt, t, eye, stg, presence) {
         floorMaterial.uniforms.time.value = t;
         fishMat.uniforms.time.value = t;
         outerBellMat.uniforms.time.value = t;
@@ -923,26 +1060,48 @@ export default {
         snowMat.uniforms.time.value = t;
         snowMat.uniforms.pxPerCm.value = stg.pxPerCm;
         snowMat.uniforms.eyeZ.value = Math.max(eye.z, 15.0);
+        snowMat.uniforms.boxH.value = stg.H * 1.1;
 
         sharkTimer += dt;
-        if (sharkTimer >= sharkNextTime) {
-          sharkDartRemaining = 3.2;
+        if (sharkPass < 0 && sharkTimer >= sharkNextTime) {
+          sharkPass = 0;
+          sharkDir = Math.random() < 0.5 ? 1 : -1;
           sharkTimer = 0;
           sharkNextTime = 25.0 + Math.random() * 15.0;
         }
 
-        if (sharkDartRemaining > 0) {
-          sharkDartRemaining -= dt;
+        if (sharkPass >= 0) {
+          sharkPass += dt / SHARK_PASS_S;
+          const span = stg.W * 0.5 + 22;
+          const x = (sharkPass * 2 - 1) * span * sharkDir;
+          const y = 1.5 + Math.sin(sharkPass * Math.PI * 2) * 1.5;
+          const z = -50 + Math.sin(sharkPass * Math.PI) * 6;
+          shark.visible = true;
+          shark.position.set(x, y, z);
+          shark.rotation.y = sharkDir > 0 ? 0 : Math.PI;
+          shark.rotation.z = Math.cos(sharkPass * Math.PI * 2) * 0.08 * sharkDir;
+          sharkMat.uniforms.time.value = t;
+          sharkMat.uniforms.opacity.value = 0.92 * Math.min(1, Math.min(sharkPass, 1 - sharkPass) * 8);
           velUniforms.sharkActive.value = 1.0;
-          velUniforms.sharkPos.value.set(Math.sin(t * 2.8) * 16.0, 0.0, -42.0);
+          velUniforms.sharkPos.value.set(x, y, z);
+          if (sharkPass >= 1) {
+            sharkPass = -1;
+            shark.visible = false;
+          }
         } else {
           velUniforms.sharkActive.value = 0.0;
         }
+        kelpMat.uniforms.time.value = t;
 
         velUniforms.delta.value = Math.min(dt, 0.033);
         velUniforms.time.value = t;
-        velUniforms.predator.value.set(eye.x, eye.y, eye.z);
-        velUniforms.predatorRadius.value = (eye.z < 35.0) ? 32.0 : 22.0;
+        // Lean in from ~50 cm toward ~32 cm and the school parts in front of your face.
+        const present = presence && presence.mode !== 'none' && presence.tracked;
+        const lean = present ? T.MathUtils.smoothstep(50 - eye.z, 0, 18) : 0;
+        predatorStrength += (lean - predatorStrength) * Math.min(1, dt * 4);
+        velUniforms.predatorStrength.value = predatorStrength;
+        velUniforms.predator.value.set(eye.x * 0.8, eye.y * 0.8, -12.0);
+        velUniforms.predatorRadius.value = 12.0 + predatorStrength * 10.0;
 
         posUniforms.delta.value = Math.min(dt, 0.033);
 
@@ -968,6 +1127,7 @@ export default {
 
       onResize(stg) {
         updateCaveGeometry(stg);
+        placeKelp(stg);
         velUniforms.boundsMin.value.set(-stg.W * 0.45, -stg.H * 0.45, -58.0);
         velUniforms.boundsMax.value.set(stg.W * 0.45, stg.H * 0.45, -14.0);
       },
@@ -1012,16 +1172,7 @@ export default {
         snowGeo.dispose();
         snowMat.dispose();
 
-        root.traverse((obj) => {
-          if (obj.isMesh) {
-            if (obj.geometry) obj.geometry.dispose();
-            if (obj.material) {
-              if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-              else obj.material.dispose();
-            }
-          }
-        });
-        root.clear();
+        disposeObject(root);
       }
     };
   }

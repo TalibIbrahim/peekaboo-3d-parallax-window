@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { edgeFadeVertexGLSL } from '../shaders/edgeFade.js';
 
 export class Stage {
+  /**
+   * @param {number} drawingBufferHeight - canvas height in device pixels; used to size points in cm
+   */
   constructor(screenW = 34.5, screenH = 19.4, drawingBufferHeight = 1080) {
     this.backZ = -70.0;
     this.frontZ = 14.0;
@@ -81,9 +84,12 @@ export class Stage {
       { x:  15, y:  8, z: 70 }
     ];
 
-    const box = new THREE.Box3();
-    const corner = new THREE.Vector3();
-    const proj = new THREE.Vector3();
+    const box = this._box || (this._box = new THREE.Box3());
+    const corner = this._corner || (this._corner = new THREE.Vector3());
+    const proj = this._proj || (this._proj = new THREE.Vector3());
+    const projMat = this._projMat || (this._projMat = new THREE.Matrix4());
+    const viewMat = this._viewMat || (this._viewMat = new THREE.Matrix4());
+    const viewProj = this._viewProj || (this._viewProj = new THREE.Matrix4());
 
     for (const mesh of this.registeredPopOuts) {
       if (!mesh.visible) continue;
@@ -105,9 +111,9 @@ export class Stage {
         const bottom = (-this.H * 0.5 - eye.y) * near / eyeZ;
         const top    = ( this.H * 0.5 - eye.y) * near / eyeZ;
 
-        const projMat = new THREE.Matrix4().makePerspective(left, right, top, bottom, near, 2000);
-        const viewMat = new THREE.Matrix4().makeTranslation(-eye.x, -eye.y, -eyeZ);
-        const viewProj = new THREE.Matrix4().multiplyMatrices(projMat, viewMat);
+        projMat.makePerspective(left, right, top, bottom, near, 2000);
+        viewMat.makeTranslation(-eye.x, -eye.y, -eyeZ);
+        viewProj.multiplyMatrices(projMat, viewMat);
 
         for (let cz = 0; cz <= 1; cz++) {
           for (let cy = 0; cy <= 1; cy++) {
@@ -136,7 +142,7 @@ export class Stage {
 
       // Tint object red if violating
       if (violates) {
-        if (!mesh.userData._origEmissive && mesh.material && mesh.material.emissive) {
+        if (mesh.userData._origEmissive === undefined && mesh.material && mesh.material.emissive) {
           mesh.userData._origEmissive = mesh.material.emissive.getHex();
         }
         if (mesh.material && mesh.material.emissive) {
